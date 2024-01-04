@@ -674,7 +674,7 @@ class LiftedDenoisingDiffusion(pl.LightningModule):
                     _ = self.visualization_tools.visualize_chain(result_path,
                                                                  chain_X[:, i, :].numpy(),
                                                                  chain_E[:, i, :].numpy())
-                print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
+                print('\r{}/{} complete'.format(i+1, num_molecules), end=''""", flush=True""")
 
             # Visualize the final molecules
             print("Visualizing molecules...")

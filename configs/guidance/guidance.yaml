@@ -1,0 +1,32 @@
+guidance_medium: 'both' #XE for placing the guidance as an extra feature on X and E, or 'y' for placing it on y.
+
+s : 5                   #<= 0: do not use guidance
+                        #   1: use VQ diffusion guidance
+                        #>= 1: use IMPROVED VQ diffusion guidance
+                        
+guidance_target: 'both' # null is the default when not using guidance. Otherwise, use 'homo', 'mu' or 'both'
+
+#'crossentropy' | 'kl' | 'nll'
+loss: 'crossentropy'    
+
+p_uncond: 0.1
+
+trainable_cf: True      #if false, does not train the null token
+
+n_test_molecules_to_sample: 100
+n_samples_per_test_molecule: 10
+
+node_model_path: null
+node_inference_method: "sample" #sample or argmax
+
+build_with_partial_charges: True
+experiment_type: 'new_method'
+
+guidance_properties_list: ['logp', 'qed']
+test_thresholds: {'mu'   : [-99999,  99999], 
+                  'homo' : [-99999,  99999],
+         'penalizedlogp' : [  -2.5,     -2],  #[5, 5.5]
+                  'logp' : [-99999,  99999],
+                  'sas'  : [-99999,  99999],
+                  'qed'  : [   0.8,  99999],
+                  'mw'   : [   150,    200]}  #[500, 550]

@@ -9,8 +9,9 @@ import warnings
 import torch
 torch.cuda.empty_cache()
 import hydra
-from omegaconf import DictConfig
-from pytorch_lightning import Trainer
+import omegaconf
+from omegaconf import DictConfig, OmegaConf, open_dict
+from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.utilities.warnings import PossibleUserWarning
 
@@ -30,6 +31,23 @@ def get_resume(cfg, model_kwargs):
     saved_cfg = cfg.copy()
     name = cfg.general.name + '_resume'
     resume = cfg.general.test_only
+
+    #guidance stuff
+    batch_size                  = cfg.train.batch_size
+    n_epochs                    = cfg.train.n_epochs
+    n_test_molecules_to_sample  = cfg.guidance.n_test_molecules_to_sample
+    n_samples_per_test_molecule = cfg.guidance.n_samples_per_test_molecule
+    s                           = cfg.guidance.s
+    node_model_path             = cfg.guidance.node_model_path
+    build_with_partial_charges  = cfg.guidance.build_with_partial_charges
+    experiment_type             = cfg.guidance.experiment_type
+    guidance_properties_list    = cfg.guidance.guidance_properties_list
+    test_thresholds             = cfg.guidance.test_thresholds
+    wandb                       = cfg.general.wandb
+    gpus                        = cfg.general.gpus
+    include_split               = cfg.guidance.include_split
+    node_inference_method       = cfg.guidance.node_inference_method
+    
     if cfg.model.type == 'discrete':
         model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
     else:
@@ -37,6 +55,24 @@ def get_resume(cfg, model_kwargs):
     cfg = model.cfg
     cfg.general.test_only = resume
     cfg.general.name = name
+
+    OmegaConf.set_struct(cfg, True)
+    with open_dict(cfg):
+        cfg.train.batch_size                     = batch_size
+        cfg.train.n_epochs                       = n_epochs
+        cfg.guidance.n_test_molecules_to_sample  = n_test_molecules_to_sample
+        cfg.guidance.n_samples_per_test_molecule = n_samples_per_test_molecule 
+        cfg.guidance.s                           = s
+        cfg.guidance.node_model_path             = node_model_path
+        cfg.guidance.build_with_partial_charges  = build_with_partial_charges
+        cfg.guidance.experiment_type             = experiment_type
+        cfg.guidance.guidance_properties_list    = guidance_properties_list
+        cfg.guidance.test_thresholds             = test_thresholds
+        cfg.general.wandb                        = wandb
+        cfg.general.gpus                         = gpus
+        cfg.guidance.include_split               = include_split
+        cfg.guidance.node_inference_method       = node_inference_method
+
     cfg = utils.update_config_with_new_keys(cfg, saved_cfg)
     return cfg, model
 
@@ -70,7 +106,15 @@ def get_resume_adaptive(cfg, model_kwargs):
 
 @hydra.main(version_base='1.3', config_path='../configs', config_name='config')
 def main(cfg: DictConfig):
+    print("CFG = ", cfg)
     dataset_config = cfg["dataset"]
+
+    print("get_num_threads", torch.get_num_threads())
+    torch.set_num_threads(cfg.train.num_interops_workers)
+    torch.set_num_interop_threads(cfg.train.num_interops_workers)
+    print("get_num_threads", torch.get_num_threads())
+
+    seed_everything(cfg.train.seed)
 
     if dataset_config["name"] in ['sbm', 'comm-20', 'planar']:
         from datasets.spectre_dataset import SpectreGraphDataModule, SpectreDatasetInfos
@@ -174,11 +218,11 @@ def main(cfg: DictConfig):
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
                                               monitor='val/epoch_NLL',
-                                              save_top_k=5,
+                                              save_last=True,
+                                              save_top_k=3,    # was 5
                                               mode='min',
-                                              every_n_epochs=1)
-        last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
-        callbacks.append(last_ckpt_save)
+                                              every_n_epochs=cfg.train.ckpt_every_n_train_steps,
+                                              save_on_train_epoch_end = True)
         callbacks.append(checkpoint_callback)
 
     if cfg.train.ema_decay > 0:
@@ -189,7 +233,27 @@ def main(cfg: DictConfig):
     if name == 'debug':
         print("[WARNING]: Run is called 'debug' -- it will run with fast_dev_run. ")
 
-    use_gpu = cfg.general.gpus > 0 and torch.cuda.is_available()
+    if(isinstance(cfg.general.gpus, int)):
+        gpus_ok = cfg.general.gpus >= 0
+    elif(isinstance(cfg.general.gpus, omegaconf.ListConfig)):
+        gpus_ok = True
+        for gpu in cfg.general.gpus:
+            if(gpu < 0): gpus_ok = False
+    else:
+        gpus_ok = False
+    
+    print("cfg.general.gpus", cfg.general.gpus)
+    print("torch.cuda.is_available()", torch.cuda.is_available())
+
+    use_gpu = torch.cuda.is_available() and gpus_ok
+    print("gpus_ok", gpus_ok)
+    print("use_gpu", use_gpu)
+
+    if(cfg.guidance.experiment_type == 'accuracy'):
+        limit_test_batches = 1.0
+    else:
+        limit_test_batches = cfg.guidance.n_test_molecules_to_sample 
+
     trainer = Trainer(gradient_clip_val=cfg.train.clip_grad,
                       strategy="ddp_find_unused_parameters_true",  # Needed to load old checkpoints
                       accelerator='gpu' if use_gpu else 'cpu',
@@ -197,15 +261,16 @@ def main(cfg: DictConfig):
                       max_epochs=cfg.train.n_epochs,
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
                       fast_dev_run=cfg.general.name == 'debug',
-                      enable_progress_bar=False,
+                      enable_progress_bar = cfg.train.progress_bar,
                       callbacks=callbacks,
                       log_every_n_steps=50 if name != 'debug' else 1,
                       logger = [])
 
     if not cfg.general.test_only:
         trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.general.resume)
-        if cfg.general.name not in ['debug', 'test']:
-            trainer.test(model, datamodule=datamodule)
+        #if cfg.general.name not in ['debug', 'test']:
+        #    trainer.test(model, datamodule=datamodule)
+        trainer.test(model, datamodule=datamodule)
     else:
         # Start by evaluating test_only_path
         trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)

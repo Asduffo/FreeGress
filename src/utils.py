@@ -101,16 +101,19 @@ def update_config_with_new_keys(cfg, saved_cfg):
 
 
 class PlaceHolder:
-    def __init__(self, X, E, y):
+    def __init__(self, X, E, y, guidance = None):
         self.X = X
         self.E = E
         self.y = y
+        self.guidance = guidance
 
     def type_as(self, x: torch.Tensor):
         """ Changes the device and dtype of X, E, y. """
         self.X = self.X.type_as(x)
         self.E = self.E.type_as(x)
         self.y = self.y.type_as(x)
+        if(self.guidance is not None):
+            self.guidance = self.guidance.type_as(x)
         return self
 
     def mask(self, node_mask, collapse=False):
@@ -137,3 +140,102 @@ def setup_wandb(cfg):
               'settings': wandb.Settings(_disable_stats=True), 'reinit': True, 'mode': cfg.general.wandb}
     wandb.init(**kwargs)
     wandb.save('*.txt')
+
+###############################################################################
+# FreeGress stuff
+def rstrip1(s, c):
+    return s[:-1] if s[-1]==c else s
+
+from rdkit import Chem
+from rdkit.Chem.MolStandardize import rdMolStandardize
+from rdkit.Chem import rdMolDescriptors, Crippen
+
+from src.datasets.guided_data import GuidedInMemoryDataset
+from src.metrics.properties import penalized_logp, qed
+from src.metrics.sascorer import calculateScore
+from src.analysis.rdkit_functions import build_molecule
+from torch_geometric.data import Batch
+import torch.nn.functional as F
+
+
+
+def clean_mol(mol):
+    if(isinstance(mol, str)):
+        mol = Chem.MolFromSmiles(mol)
+
+    Chem.RemoveStereochemistry(mol)
+    mol = rdMolStandardize.Uncharger().uncharge(mol)
+    Chem.SanitizeMol(mol)
+    
+    return mol
+
+def graph2mol(data, atom_decoder):
+    data = Batch.from_data_list([data])
+
+    #print(data)
+
+    #smonta la variabile "data" costruita sopra e ri-ottiene nodi ed archo
+    dense_data, node_mask = to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
+    dense_data = dense_data.mask(node_mask, collapse=True)
+    X, E = dense_data.X, dense_data.E
+
+    assert X.size(0) == 1
+    atom_types = X[0]
+    edge_types = E[0]
+
+    #Questi sono anche i metodi utilizzati quando calcolavamo mu/HOMO in qm9, quindi
+    #possiamo fidarci del fatto che funzionino (e comunque sono piuttosto utilizzati
+    #in quanto provengono da un paper piuttosto citato da cui hanno preso tutti lo
+    #spezzone di codice)
+    reconstructed_mol = build_molecule(atom_types, edge_types, atom_decoder)
+    return reconstructed_mol
+
+def mol2graph(mol, types, bonds, i, original_smiles = None, estimate_guidance = True):
+    N = mol.GetNumAtoms()
+
+    type_idx = []
+    for atom in mol.GetAtoms():
+        type_idx.append(types[atom.GetSymbol()])
+
+    row, col, edge_type = [], [], []
+    for bond in mol.GetBonds():
+        start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        row += [start, end]
+        col += [end, start]
+        edge_type += 2 * [bonds[bond.GetBondType()] + 1]
+
+    if len(row) == 0:
+        print("Number of rows = 0")
+        return None
+
+    x = F.one_hot(torch.tensor(type_idx), num_classes=len(types)).float()
+    y = torch.zeros(size=(1, 0), dtype=torch.float)
+    edge_index = torch.tensor([row, col], dtype=torch.long)
+    edge_type = torch.tensor(edge_type, dtype=torch.long)
+    edge_attr = F.one_hot(edge_type, num_classes=len(bonds) + 1).to(torch.float)
+
+    perm = (edge_index[0] * N + edge_index[1]).argsort()
+    edge_index = edge_index[:, perm]
+    edge_attr = edge_attr[perm]
+
+    #stime di plogp, mw, sas e logp
+    guidance = None
+    if(estimate_guidance):
+        guidance = torch.zeros((1, 5))
+        estimated_plogp = penalized_logp(mol)
+        estimated_qed   = qed(original_smiles)
+        estimated_mw    = rdMolDescriptors.CalcExactMolWt(mol)
+        estimated_sas   = calculateScore(mol)
+        estimated_logp  = Crippen.MolLogP(mol)
+        
+        guidance[0, 0] = estimated_plogp
+        guidance[0, 1] = estimated_qed
+        guidance[0, 2] = estimated_mw
+        guidance[0, 3] = estimated_sas
+        guidance[0, 4] = estimated_logp
+    
+    #questo è l'oggetto effettivo che viene poi usato durante il
+    #training. Più in basso verrà salvato in un formato gradito da
+    #pytorch per poter essere riutilizzato più volte
+    return GuidedInMemoryDataset(x=x, edge_index=edge_index, edge_attr=edge_attr, 
+                                y=y, idx=i, guidance=guidance, original_smiles = original_smiles)

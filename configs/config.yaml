@@ -4,6 +4,7 @@ defaults:
     - model : discrete
     - train : train_default
     - dataset : qm9
+    - guidance : guidance
 
 hydra:
   job:

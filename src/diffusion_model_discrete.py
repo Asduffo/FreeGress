@@ -14,6 +14,31 @@ from metrics.train_metrics import TrainLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from src import utils
 
+####################################################à
+#extra imports
+
+from torch.distributions import Categorical
+from torchmetrics import MeanAbsoluteError
+from src.guidance.node_model import QM9NodeModel
+
+from rdkit.Chem.rdDistGeom import ETKDGv3, EmbedMolecule
+from rdkit.Chem.rdForceFieldHelpers import MMFFHasAllMoleculeParams, MMFFOptimizeMolecule
+from rdkit import Chem
+import math
+try:
+    import psi4
+except ModuleNotFoundError:
+    print("PSI4 not found")
+from src.analysis.rdkit_functions import build_molecule, mol2smiles, build_molecule_with_partial_charges
+import pickle
+import pandas as pd
+
+from rdkit.Chem import Crippen
+from src.metrics.sascorer import calculateScore
+from src.utils import graph2mol, clean_mol
+from src.metrics.properties import mw, penalized_logp, qed
+
+from datasets import qm9_dataset
 
 class DiscreteDenoisingDiffusion(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
@@ -100,6 +125,25 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.best_val_nll = 1e8
         self.val_counter = 0
 
+        ##################################################################################
+
+        #this will be used as the guidance when we need to calculate p(G_{t-1}|G_t) without the guidance
+        if(self.cfg.guidance.trainable_cf == True):
+            self.cf_null_token = torch.nn.parameter.Parameter(torch.randn(size = (1, self.gdim)))
+        else:
+            self.cf_null_token = torch.zeros(size = (1, self.gdim))
+
+        # specific properties to generate molecules
+        self.cond_val = MeanAbsoluteError()
+        self.num_valid_molecules = 0
+        self.num_total = 0
+
+        #wish I had a more elegant way to do this
+        self.node_model = None
+
+        #stores the generated smiles on the test step
+        self.generated_smiles = []
+
     def training_step(self, data, i):
         if data.edge_index.numel() == 0:
             self.print("Found a batch with no edges. Skipping.")
@@ -109,7 +153,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         X, E = dense_data.X, dense_data.E
         noisy_data = self.apply_noise(X, E, data.y, node_mask)
         extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
+        pred = self.forward(noisy_data, extra_data, node_mask, data.guidance, train_step = True)
         loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
                                true_X=X, true_E=E, true_y=data.y,
                                log=i % self.log_every_steps == 0)
@@ -157,8 +201,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         dense_data = dense_data.mask(node_mask)
         noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
         extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
-        nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
+        pred = self.forward(noisy_data, extra_data, node_mask, data.guidance)
+        nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False,
+                                    guidance = data.guidance)
         return {'loss': nll}
 
     def on_validation_epoch_end(self) -> None:
@@ -223,77 +268,607 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             utils.setup_wandb(self.cfg)
 
     def test_step(self, data, i):
+        if(self.cfg.train.batch_size > 1):
+            print("WARNING: batch size > 1. You may not have enough batches to run this test.",
+                  "Try relaunching this experiment with train.batch_size=1")
+            print("batch size is:", self.cfg.train.batch_size)
+            data.guidance = data.guidance[0,:]
+
+        #checks if the current guidance element satisfies the required ranges
+        if(self.cfg.guidance.experiment_type == 'accuracy'):
+            valid_properties = self.cfg.guidance.guidance_properties_list
+            test_thresholds  = self.cfg.guidance.test_thresholds
+
+            k = 0
+            for valid_property in valid_properties:
+                curr_property = data.guidance[0, k].item()
+                valid_threshold = test_thresholds[valid_property]
+
+                if(valid_threshold[0] > curr_property or curr_property > valid_threshold[1]):
+                    print(f"passing {i}-th element (value = {curr_property}).")
+                    return None
+
+                k = k + 1
+        
+        print(f'Select No.{i+1} test molecule')
+        # Extract properties
+        target_properties = data.guidance.clone()
+        
+        #loads self.node_model (only the first time because of the check self.node_model == None)
+        if(self.node_model == None and self.cfg.guidance.node_model_path != None):
+            #actually unused (zinc ended up not using guidance_target='both')
+            if(self.cfg.guidance.guidance_target == 'both'):
+                if(self.cfg.dataset.name == 'zinc250k'):
+                    input_size = 2
+                else:
+                    input_size = 2
+            else:
+                input_size = 1
+
+            node_model_kwargs  = {'cfg': self.cfg, 'dataset_infos': self.dataset_info, 'input_size': input_size}
+            self.node_model = QM9NodeModel.load_from_checkpoint(self.cfg.guidance.node_model_path, **node_model_kwargs)
+            self.node_model.cfg.general.gpus = self.cfg.general.gpus
+
+        num_nodes = None
+        if(self.node_model != None):
+            input_guidance = data.guidance.repeat(self.cfg.guidance.n_samples_per_test_molecule, 1).to(data.guidance.device)
+            num_nodes = torch.nn.functional.softmax(self.node_model.forward_data(input_guidance), dim=-1)
+            #print("raw num_nodes", num_nodes)
+            print("num nodes shape:", num_nodes.size())
+            
+            if(self.cfg.guidance.node_inference_method == "sample"):
+                #this takes num_nodes, and FOR EACH ROW INDEPENDENTLY samples one integer
+                #from the distribution represented by that row
+                num_nodes = torch.tensor([Categorical(num_nodes[i, ...]).sample().item() 
+                                          for i in range(num_nodes.shape[0])]).to(data.guidance.device)
+            else:
+                num_nodes = torch.argmax(num_nodes, dim = -1).to(data.guidance.device)
+            print("num_nodes", num_nodes)
+
+        data.guidance = torch.zeros(data.guidance.shape[0], 0).type_as(data.guidance)
+        print("TARGET PROPERTIES", target_properties)
+
+        start = time.time()
+        
+        ident = 0
+        samples = self.sample_batch(batch_id=ident, 
+                                    batch_size=self.cfg.guidance.n_samples_per_test_molecule, 
+                                    num_nodes=num_nodes,
+                                    save_final=10,
+                                    keep_chain=1,
+                                    number_chain_steps=self.number_chain_steps,
+                                    guidance=target_properties)
+        print(f'Sampling took {time.time() - start:.2f} seconds\n')
+        self.save_cond_samples(samples, target_properties, file_path=os.path.join(os.getcwd(), f'cond_smiles{i}.pkl'))
+
+
+        #######################################################################
+        """
+        mol = graph2mol(data, self.dataset_info.atom_decoder)
+
         dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
-        dense_data = dense_data.mask(node_mask)
-        noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
-        extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
-        nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y, node_mask, test=True)
-        return {'loss': nll}
+        dense_data = dense_data.mask(node_mask, collapse=True)
+        X, E = dense_data.X, dense_data.E
+        atom_types = X[0]
+        edge_types = E[0]
+        samples = [[atom_types, edge_types] for i in range(1)]
+
+        smiles = mol2smiles(mol)
+
+        
+        if(data.original_smiles[0] == smiles): print("matching smiles")
+        else: print("!!!!!!!!!!!!!!!!!!!!!! unmatching smiles: ", data.original_smiles, " became ", smiles)
+        print("original smiles", smiles)
+        """
+        #######################################################################
+
+        # save conditional generated samples
+        mae = self.cond_sample_metric(samples, target_properties)
+
+        print("==============================================================")
+        return {'mae': mae}
 
     def on_test_epoch_end(self) -> None:
-        """ Measure likelihood on a test set and compute stability metrics. """
-        metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
-                   self.test_X_logp.compute(), self.test_E_logp.compute()]
-        if wandb.run:
-            wandb.log({"test/epoch_NLL": metrics[0],
-                       "test/X_kl": metrics[1],
-                       "test/E_kl": metrics[2],
-                       "test/X_logp": metrics[3],
-                       "test/E_logp": metrics[4]}, commit=False)
+        final_mae = self.cond_val.compute()
+        final_validity = self.num_valid_molecules / self.num_total
+        print("Final MAE", final_mae)
+        print("Final validity", final_validity * 100)
 
-        self.print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f} -- ",
-                   f"Test Edge type KL: {metrics[2] :.2f}")
+        #######################################################################
+        unique_generated_smiles = set(self.generated_smiles)
+        if(len(self.generated_smiles) != 0):
+            final_uniqueness = len(unique_generated_smiles)/len(self.generated_smiles)
+            print("final_uniqueness = ", final_uniqueness)
+        else:
+            final_uniqueness = 0
+            print("final_uniqueness = 0 due to no uniques")
 
-        test_nll = metrics[0]
-        if wandb.run:
-            wandb.log({"test/epoch_NLL": test_nll}, commit=False)
+        #Old method to get the dataset training smiles
+        """
+        #opens the training set smiles
+        
+        #path = os.path.join(os.path.dirname(os.getcwd()), self.cfg.dataset.datadir, "/raw/new_train.smiles")
+        path = "/DiGress/" + self.cfg.dataset.datadir + "raw/new_train.smiles"
+        print("opening ", path)
+        my_file = open(path, "r")
+  
+        # reading the file
+        data                     = my_file.read()
+        train_dataset_smiles     = data.split("\n")
+        """
 
-        self.print(f'Test loss: {test_nll :.4f}')
+        #new method (DELETE ME IF YOU USE THE OLD METHOD)
+        if(self.cfg.dataset.name == 'qm9'):
+            train_dataset_smiles = qm9_dataset.get_train_smiles(cfg=self.cfg, train_dataloader=None,
+                                                        dataset_infos=self.dataset_infos, evaluate_dataset=False)
+        else:
+            print("TODO: implement get_train_smiles for other datasets")
 
-        samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
-        samples_left_to_save = self.cfg.general.final_model_samples_to_save
-        chains_left_to_save = self.cfg.general.final_model_chains_to_save
+        train_dataset_smiles_set = set(train_dataset_smiles)
+        print("There are ", len(train_dataset_smiles_set), " smiles in the training set")
 
-        samples = []
-        id = 0
-        while samples_left_to_generate > 0:
-            self.print(f'Samples left to generate: {samples_left_to_generate}/'
-                       f'{self.cfg.general.final_model_samples_to_generate}', end='', flush=True)
-            bs = 2 * self.cfg.train.batch_size
-            to_generate = min(samples_left_to_generate, bs)
-            to_save = min(samples_left_to_save, bs)
-            chains_save = min(chains_left_to_save, bs)
-            samples.extend(self.sample_batch(id, to_generate, num_nodes=None, save_final=to_save,
-                                             keep_chain=chains_save, number_chain_steps=self.number_chain_steps))
-            id += to_generate
-            samples_left_to_save -= to_save
-            samples_left_to_generate -= to_generate
-            chains_left_to_save -= chains_save
-        self.print("Saving the generated graphs")
-        filename = f'generated_samples1.txt'
-        for i in range(2, 10):
-            if os.path.exists(filename):
-                filename = f'generated_samples{i}.txt'
+        """
+        unique_generated_smiles = set(["CC(C)C(=O)Nc1ccc(NC(=O)NC(C)C(=O)N2CCCCC2C)cc1",
+                                       "KK",
+                                       "COc1ccc(-c2nnc(SC3CCOC3=O)n2-c2ccccc2)cc1",
+                                       "BB",
+                                       "CC(C)n1nc(CC(=O)Nc2cccc3c2ccn3C(C)C)c2ccccc2c1=O"])
+        train_dataset_smiles_set = set(["AA", "BB", "CC", "DD", "EE"])
+        self.generated_smiles = unique_generated_smiles
+        """
+
+        final_novelty_smiles   = unique_generated_smiles.difference(train_dataset_smiles_set)
+
+        if(len(unique_generated_smiles) != 0):
+            final_novelty          = len(final_novelty_smiles)/len(unique_generated_smiles)
+            print("final_novelty", final_novelty)
+        else:
+            final_novelty = 0
+            print("Final Novelty = 0 due to no smiles generated")
+        #######################################################################
+
+        wandb.run.summary['final_MAE'] = final_mae
+        wandb.run.summary['final_validity'] = final_validity
+        wandb.run.summary['final_uniqueness'] = final_uniqueness
+        wandb.log({'final mae': final_mae,
+                   'final validity': final_validity,
+                   'final uniqueness': final_uniqueness})
+        
+    def cond_sample_metric(self, samples, input_properties):
+        if(self.cfg.guidance.experiment_type in ['new_method', 'accuracy']):
+            return self.accuracy_test(samples, input_properties)
+        else:
+            return self.original_test(samples, input_properties)
+
+    
+    def accuracy_test(self, samples, input_properties):
+        valid_properties = self.cfg.guidance.guidance_properties_list
+        test_thresholds  = self.cfg.guidance.test_thresholds
+
+        if('mu' in valid_properties or 'homo' in valid_properties):
+            try:
+                import psi4
+                # Hardware side settings (CPU thread number and memory settings used for calculation)
+                psi4.set_num_threads(nthread=4)
+                psi4.set_memory("5GB")
+                psi4.core.set_output_file('psi4_output.dat', False)
+            except ModuleNotFoundError:
+                print("PSI4 not found")
+
+        print("valid_properties", valid_properties)
+
+        numerical_results_dict = {}
+        binary_results_dict    = {}
+        for tgt in valid_properties:
+            numerical_results_dict[tgt] = []
+            binary_results_dict[tgt]    = []
+
+        split_molecules = 0
+        sample_smiles = []
+
+        for sample in samples:
+            if(self.cfg.guidance.build_with_partial_charges):
+                raw_mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder)
             else:
-                break
-        with open(filename, 'w') as f:
-            for item in samples:
-                f.write(f"N={item[0].shape[0]}\n")
-                atoms = item[0].tolist()
-                f.write("X: \n")
-                for at in atoms:
-                    f.write(f"{at} ")
-                f.write("\n")
-                f.write("E: \n")
-                for bond_list in item[1]:
-                    for bond in bond_list:
-                        f.write(f"{bond} ")
-                    f.write("\n")
-                f.write("\n")
-        self.print("Generated graphs Saved. Computing sampling metrics...")
-        self.sampling_metrics(samples, self.name, self.current_epoch, self.val_counter, test=True, local_rank=self.local_rank)
-        self.print("Done testing.")
+                raw_mol = build_molecule(sample[0], sample[1], self.dataset_info.atom_decoder)
+
+            mol = Chem.rdchem.RWMol(raw_mol)
+
+            try:
+                Chem.SanitizeMol(mol)
+            except:
+                print('invalid chemistry')
+                continue
+
+            # Coarse 3D structure optimization by generating 3D structure from SMILES
+            mol = Chem.AddHs(mol)
+            params = ETKDGv3()
+            params.randomSeed = 1
+            try:
+                EmbedMolecule(mol, params)
+            except Chem.rdchem.AtomValenceException:
+                print('invalid chemistry')
+                continue
+
+            # Structural optimization with MMFF (Merck Molecular Force Field)
+            try:
+                s = MMFFOptimizeMolecule(mol)
+                print(s)
+            except:
+                print('Bad conformer ID')
+                continue
+
+            try:
+                conf = mol.GetConformer()
+            except:
+                print("GetConformer failed")
+                continue
+
+            if(self.cfg.guidance.include_split == False):
+                mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+                if(len(mol_frags) > 1):
+                    print("Ignoring a split molecule")
+                    split_molecules = split_molecules + 1
+                    continue
+
+            ##########################################################
+            ##########################################################
+
+            if('mu' in valid_properties or 'homo' in valid_properties):
+                # Convert to a format that can be input to Psi4.
+                # Set charge and spin multiplicity (below is charge 0, spin multiplicity 1)
+
+                # Get the formal charge
+                fc = 'FormalCharge'
+                mol_FormalCharge = int(mol.GetProp(fc)) if mol.HasProp(fc) else Chem.GetFormalCharge(mol)
+
+                sm = 'SpinMultiplicity'
+                if mol.HasProp(sm):
+                    mol_spin_multiplicity = int(mol.GetProp(sm))
+                else:
+                    # Calculate spin multiplicity using Hund's rule of maximum multiplicity...
+                    NumRadicalElectrons = 0
+                    for Atom in mol.GetAtoms():
+                        NumRadicalElectrons += Atom.GetNumRadicalElectrons()
+                    TotalElectronicSpin = NumRadicalElectrons / 2
+                    SpinMultiplicity = 2 * TotalElectronicSpin + 1
+                    mol_spin_multiplicity = int(SpinMultiplicity)
+
+                mol_input = "%s %s" % (mol_FormalCharge, mol_spin_multiplicity)
+                print(mol_input)
+                #mol_input = "0 1"
+
+                # Describe the coordinates of each atom in XYZ format
+                for atom in mol.GetAtoms():
+                    mol_input += "\n " + atom.GetSymbol() + " " + str(conf.GetAtomPosition(atom.GetIdx()).x) \
+                                + " " + str(conf.GetAtomPosition(atom.GetIdx()).y) \
+                                + " " + str(conf.GetAtomPosition(atom.GetIdx()).z)
+
+                try:
+                    molecule = psi4.geometry(mol_input)
+                except:
+                    print('Can not calculate psi4 geometry')
+                    continue
+
+                # Convert to a format that can be input to pyscf
+                # Set calculation method (functional) and basis set
+                level = "b3lyp/6-31G*"
+
+                # Calculation method (functional), example of basis set
+                # theory = ['hf', 'b3lyp']
+                # basis_set = ['sto-3g', '3-21G', '6-31G(d)', '6-31+G(d,p)', '6-311++G(2d,p)']
+
+                # Perform structural optimization calculations
+                print('Psi4 calculation starts!!!')
+                #energy, wave_function = psi4.optimize(level, molecule=molecule, return_wfn=True)
+                try:
+                    energy, wave_function = psi4.energy(level, molecule=molecule, return_wfn=True)
+                except:
+                    print("Psi4 did not converge")
+                    continue
+
+                print('Chemistry information check!!!')
+            
+            ##########################################################
+            ##########################################################
+            try:
+                mol = raw_mol
+                mol = clean_mol(mol)
+
+                smile = Chem.MolToSmiles(mol)
+                print("Generated SMILES ", smile)
+            except:
+                print("clean_mol failed")
+                continue
+
+            sample_smiles.append(smile)
+            self.generated_smiles.append(smile)
+
+            if 'mu' in valid_properties:
+                dip_x, dip_y, dip_z = wave_function.variable('SCF DIPOLE')[0],\
+                                      wave_function.variable('SCF DIPOLE')[1],\
+                                      wave_function.variable('SCF DIPOLE')[2]
+                dipole_moment = math.sqrt(dip_x**2 + dip_y**2 + dip_z**2) * 2.5417464519
+                print("Dipole moment", dipole_moment)
+                
+                thresholds = test_thresholds['mu']
+                if(thresholds[0] <= dipole_moment and dipole_moment <= thresholds[1]):
+                    binary_results_dict['mu'].append(1)
+                else:
+                    binary_results_dict['mu'].append(0)
+                numerical_results_dict['mu'].append(dipole_moment)
+
+            if 'homo' in valid_properties:
+                # Compute HOMO (Unit: au= Hartree）
+                LUMO_idx = wave_function.nalpha()
+                HOMO_idx = LUMO_idx - 1
+                homo = wave_function.epsilon_a_subset("AO", "ALL").np[HOMO_idx]
+
+                # convert unit from a.u. to ev
+                homo = homo * 27.211324570273
+
+                thresholds = test_thresholds['homo']
+                if(thresholds[0] <= homo and homo <= thresholds[1]):
+                    binary_results_dict['homo'].append(1)
+                else:
+                    binary_results_dict['homo'].append(0)
+                numerical_results_dict['homo'].append(homo)
+
+            if 'penalizedlogp' in valid_properties:
+                plogp_estimate = penalized_logp(mol)
+
+                thresholds = test_thresholds['penalizedlogp']
+                if(thresholds[0] <= plogp_estimate and plogp_estimate <= thresholds[1]):
+                    binary_results_dict['penalizedlogp'].append(1)
+                else:
+                    binary_results_dict['penalizedlogp'].append(0)
+                numerical_results_dict['penalizedlogp'].append(plogp_estimate)
+
+            if 'logp' in valid_properties:
+                logp_estimate = Crippen.MolLogP(mol)
+
+                thresholds = test_thresholds['logp']
+                if(thresholds[0] <= logp_estimate and logp_estimate <= thresholds[1]):
+                    binary_results_dict['logp'].append(1)
+                else:
+                    binary_results_dict['logp'].append(0)
+                numerical_results_dict['logp'].append(logp_estimate)
+
+            if 'qed' in valid_properties:
+                qed_estimate = qed(mol)
+
+                thresholds = test_thresholds['qed']
+                if(thresholds[0] <= qed_estimate and qed_estimate <= thresholds[1]):
+                    binary_results_dict['qed'].append(1)
+                else:
+                    binary_results_dict['qed'].append(0)
+                numerical_results_dict['qed'].append(qed_estimate)
+
+            if 'mw' in valid_properties:
+                mw_estimate = mw(mol) / 100
+
+                thresholds = test_thresholds['mw']
+                if(thresholds[0] <= mw_estimate and mw_estimate <= thresholds[1]):
+                    binary_results_dict['mw'].append(1)
+                else:
+                    binary_results_dict['mw'].append(0)
+                numerical_results_dict['mw'].append(mw_estimate)
+
+            if 'sas' in valid_properties:
+                sas_estimate = calculateScore(mol)
+
+                thresholds = test_thresholds['sas']
+                if(thresholds[0] <= sas_estimate and sas_estimate <= thresholds[1]):
+                    binary_results_dict['sas'].append(1)
+                else:
+                    binary_results_dict['sas'].append(0)
+                numerical_results_dict['sas'].append(sas_estimate)
+
+        num_valid_molecules = 0
+        outputs = None
+        binary_outputs = None
+
+        for tgt in valid_properties:
+            num_valid_molecules = max(num_valid_molecules, len(numerical_results_dict[tgt]))
+
+            curr_numerical = torch.FloatTensor(numerical_results_dict[tgt])
+            curr_binary    = torch.FloatTensor(binary_results_dict[tgt])
+
+            if(outputs == None):
+                outputs        = curr_numerical.unsqueeze(1)
+                binary_outputs = curr_binary.unsqueeze(1)
+            else:
+                print("outputs", outputs)
+                print("binary_outputs", binary_outputs)
+                outputs        = torch.hstack((outputs, curr_numerical.unsqueeze(1)))
+                binary_outputs = torch.hstack((binary_outputs, curr_binary.unsqueeze(1)))
+        
+        print("Number of valid samples", num_valid_molecules)
+        self.num_valid_molecules += num_valid_molecules
+        self.num_total += len(samples)
+
+        #we can recycle tgt for outputs[tgt]
+
+        target_tensor = input_properties.repeat(outputs.size(0), 1).cpu()
+
+        print("outputs", outputs)
+
+        mae = self.cond_val(outputs, target_tensor)
+        accuracy = torch.mean(torch.count_nonzero(binary_outputs).type(torch.FloatTensor))
+        
+        unique_smiles              = set(sample_smiles)
+        n_unique_smiles            = len(unique_smiles)
+        if(len(sample_smiles) != 0):
+            n_unique_smiles_percentage = n_unique_smiles/len(sample_smiles)
+        else:
+            n_unique_smiles_percentage = 0
+        print("percentage of unique_samples: ", n_unique_smiles_percentage)
+        
+        print("binary_outputs =", binary_outputs)
+        print("target_tensor  =", target_tensor)
+
+        print('Conditional generation metric:')
+        print(f'Epoch {self.current_epoch}: MAE: {mae}')
+        print(f'Epoch {self.current_epoch}: success rate: {accuracy}')
+
+        wandb.log({"val_epoch/conditional generation mae": mae,
+                   'Valid molecules'                     : num_valid_molecules,
+                   'Valid molecules splitted'            : split_molecules,
+                   "val_epoch/n_unique_smiles"           : n_unique_smiles,
+                   "val_epoch/n_unique_smiles_percentage": n_unique_smiles_percentage,
+                   })
+
+        if(self.cfg.guidance.experiment_type == 'accuracy'):
+            wandb.log({"val_epoch/accuracy": accuracy})
+
+        return mae
+
+
+    def original_test(self, samples, input_properties):
+        try:
+            import psi4
+        except ModuleNotFoundError:
+            print("PSI4 not found")
+        mols_dipoles = []
+        mols_homo = []
+
+        # Hardware side settings (CPU thread number and memory settings used for calculation)
+        psi4.set_num_threads(nthread=4)
+        psi4.set_memory("5GB")
+        psi4.core.set_output_file('psi4_output.dat', False)
+
+        for sample in samples:
+            mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder)
+
+            try:
+                Chem.SanitizeMol(mol)
+            except:
+                print('invalid chemistry')
+                continue
+
+            # Coarse 3D structure optimization by generating 3D structure from SMILES
+            mol = Chem.AddHs(mol)
+            params = ETKDGv3()
+            params.randomSeed = 1
+            try:
+                EmbedMolecule(mol, params)
+            except Chem.rdchem.AtomValenceException:
+                print('invalid chemistry')
+                continue
+
+            # Structural optimization with MMFF (Merck Molecular Force Field)
+            try:
+                s = MMFFOptimizeMolecule(mol)
+                print(s)
+            except:
+                print('Bad conformer ID')
+                continue
+
+            try:
+                conf = mol.GetConformer()
+            except:
+                print("GetConformer failed")
+                continue
+
+            # Convert to a format that can be input to Psi4.
+            # Set charge and spin multiplicity (below is charge 0, spin multiplicity 1)
+
+            # Get the formal charge
+            fc = 'FormalCharge'
+            mol_FormalCharge = int(mol.GetProp(fc)) if mol.HasProp(fc) else Chem.GetFormalCharge(mol)
+
+            sm = 'SpinMultiplicity'
+            if mol.HasProp(sm):
+                mol_spin_multiplicity = int(mol.GetProp(sm))
+            else:
+                # Calculate spin multiplicity using Hund's rule of maximum multiplicity...
+                NumRadicalElectrons = 0
+                for Atom in mol.GetAtoms():
+                    NumRadicalElectrons += Atom.GetNumRadicalElectrons()
+                TotalElectronicSpin = NumRadicalElectrons / 2
+                SpinMultiplicity = 2 * TotalElectronicSpin + 1
+                mol_spin_multiplicity = int(SpinMultiplicity)
+
+            mol_input = "%s %s" % (mol_FormalCharge, mol_spin_multiplicity)
+            print(mol_input)
+            #mol_input = "0 1"
+
+            # Describe the coordinates of each atom in XYZ format
+            for atom in mol.GetAtoms():
+                mol_input += "\n " + atom.GetSymbol() + " " + str(conf.GetAtomPosition(atom.GetIdx()).x) \
+                             + " " + str(conf.GetAtomPosition(atom.GetIdx()).y) \
+                             + " " + str(conf.GetAtomPosition(atom.GetIdx()).z)
+
+            try:
+                molecule = psi4.geometry(mol_input)
+            except:
+                print('Can not calculate psi4 geometry')
+                continue
+
+            # Convert to a format that can be input to pyscf
+            # Set calculation method (functional) and basis set
+            level = "b3lyp/6-31G*"
+
+            # Calculation method (functional), example of basis set
+            # theory = ['hf', 'b3lyp']
+            # basis_set = ['sto-3g', '3-21G', '6-31G(d)', '6-31+G(d,p)', '6-311++G(2d,p)']
+
+            # Perform structural optimization calculations
+            print('Psi4 calculation starts!!!')
+            #energy, wave_function = psi4.optimize(level, molecule=molecule, return_wfn=True)
+            try:
+                energy, wave_function = psi4.energy(level, molecule=molecule, return_wfn=True)
+            except:
+                print("Psi4 did not converge")
+                continue
+
+            print('Chemistry information check!!!')
+
+            if self.cfg.guidance.guidance_target in ['mu', 'both']:
+                dip_x, dip_y, dip_z = wave_function.variable('SCF DIPOLE')[0],\
+                                      wave_function.variable('SCF DIPOLE')[1],\
+                                      wave_function.variable('SCF DIPOLE')[2]
+                dipole_moment = math.sqrt(dip_x**2 + dip_y**2 + dip_z**2) * 2.5417464519
+                print("Dipole moment", dipole_moment)
+                mols_dipoles.append(dipole_moment)
+
+            if self.cfg.guidance.guidance_target in ['homo', 'both']:
+                # Compute HOMO (Unit: au= Hartree）
+                LUMO_idx = wave_function.nalpha()
+                HOMO_idx = LUMO_idx - 1
+                homo = wave_function.epsilon_a_subset("AO", "ALL").np[HOMO_idx]
+
+                # convert unit from a.u. to ev
+                homo = homo * 27.211324570273
+                print("HOMO", homo)
+                mols_homo.append(homo)
+
+        num_valid_molecules = max(len(mols_dipoles), len(mols_homo))
+        print("Number of valid samples", num_valid_molecules)
+        self.num_valid_molecules += num_valid_molecules
+        self.num_total += len(samples)
+
+        mols_dipoles = torch.FloatTensor(mols_dipoles)
+        mols_homo = torch.FloatTensor(mols_homo)
+
+        if self.cfg.guidance.guidance_target == 'mu':
+            mae = self.cond_val(mols_dipoles.unsqueeze(1),
+                                input_properties.repeat(len(mols_dipoles), 1).cpu())
+
+        elif self.cfg.guidance.guidance_target == 'homo':
+            mae = self.cond_val(mols_homo.unsqueeze(1),
+                                input_properties.repeat(len(mols_homo), 1).cpu())
+
+        elif self.cfg.guidance.guidance_target == 'both':
+            properties = torch.hstack((mols_dipoles.unsqueeze(1), mols_homo.unsqueeze(1)))
+            mae = self.cond_val(properties,
+                                input_properties.repeat(len(mols_dipoles), 1).cpu())
+
+        print('Conditional generation metric:')
+        print(f'Epoch {self.current_epoch}: MAE: {mae}')
+        wandb.log({"val_epoch/conditional generation mae": mae,
+                   'Valid molecules': num_valid_molecules})
+        return mae
 
 
     def kl_prior(self, X, E, node_mask):
@@ -360,7 +935,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         kl_e = (self.test_E_kl if test else self.val_E_kl)(prob_true.E, torch.log(prob_pred.E))
         return self.T * (kl_x + kl_e)
 
-    def reconstruction_logp(self, t, X, E, node_mask):
+    def reconstruction_logp(self, t, X, E, node_mask, guidance=None):
         # Compute noise values for t = 0.
         t_zeros = torch.zeros_like(t)
         beta_0 = self.noise_schedule(t_zeros)
@@ -382,12 +957,17 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         noisy_data = {'X_t': sampled_0.X, 'E_t': sampled_0.E, 'y_t': sampled_0.y, 'node_mask': node_mask,
                       't': torch.zeros(X0.shape[0], 1).type_as(y0)}
         extra_data = self.compute_extra_data(noisy_data)
-        pred0 = self.forward(noisy_data, extra_data, node_mask)
+        pred0 = self.forward(noisy_data, extra_data, node_mask, guidance=guidance)
 
         # Normalize predictions
-        probX0 = F.softmax(pred0.X, dim=-1)
-        probE0 = F.softmax(pred0.E, dim=-1)
-        proby0 = F.softmax(pred0.y, dim=-1)
+        if(self.cfg.guidance.loss == 'crossentropy'):
+            probX0 = F.softmax(pred0.X, dim=-1)
+            probE0 = F.softmax(pred0.E, dim=-1)
+            proby0 = F.softmax(pred0.y, dim=-1)
+        else:
+            probX0 = torch.exp(pred0.X)
+            probE0 = torch.exp(pred0.E)
+            proby0 = torch.exp(pred0.y)
 
         # Set masked rows to arbitrary values that don't contribute to loss
         probX0[~node_mask] = torch.ones(self.Xdim_output).type_as(probX0)
@@ -435,7 +1015,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                       'alpha_t_bar': alpha_t_bar, 'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
         return noisy_data
 
-    def compute_val_loss(self, pred, noisy_data, X, E, y, node_mask, test=False):
+    def compute_val_loss(self, pred, noisy_data, X, E, y, node_mask, test=False, guidance = None):
         """Computes an estimator for the variational lower bound.
            pred: (batch_size, n, total_features)
            noisy_data: dict
@@ -457,7 +1037,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         # 4. Reconstruction loss
         # Compute L0 term : -log p (X, E, y | z_0) = reconstruction loss
-        prob0 = self.reconstruction_logp(t, X, E, node_mask)
+        prob0 = self.reconstruction_logp(t, X, E, node_mask, guidance)
 
         loss_term_0 = self.val_X_logp(X * prob0.X.log()) + self.val_E_logp(E * prob0.E.log())
 
@@ -476,15 +1056,128 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                        'batch_test_nll' if test else 'val_nll': nll}, commit=False)
         return nll
 
-    def forward(self, noisy_data, extra_data, node_mask):
-        X = torch.cat((noisy_data['X_t'], extra_data.X), dim=2).float()
-        E = torch.cat((noisy_data['E_t'], extra_data.E), dim=3).float()
-        y = torch.hstack((noisy_data['y_t'], extra_data.y)).float()
-        return self.model(X, E, y, node_mask)
+    #effectively returns p(G_0|G_t, y)
+    def forward(self, noisy_data, extra_data, node_mask, guidance = None, train_step = False):
+        bs = extra_data.X.size(0)
+
+        #replicates the null guidance token for the whole batch size
+        cf_null_token = self.cf_null_token.repeat((bs, 1))
+
+        #if we don't pass a guidance vector, we use the null guidance token:
+        if(guidance is None):
+            guidance = cf_null_token
+        elif(train_step and self.cfg.guidance.s > 1): #it has sense only if the guidance is not ENTIRELY equal to cf_null_token
+            #proceeds to randomly mask the guidance
+            #TODO: this likely will have to be fixed for text-based where
+            #the null token is inplanted in the query itself (it's the "pad" token)
+            #and hence all of this is already done implicitly
+
+            #True = substitute with null token
+            guidance_mask = torch.rand((bs, 1), device="cuda").to(guidance.device) < self.cfg.guidance.p_uncond
+
+            #now it has the same size as cf_null_token
+            guidance_mask = guidance_mask.repeat((1, cf_null_token.size(-1)))
+
+            guidance = torch.where(guidance_mask, cf_null_token, guidance)
+
+        #this is used during test when we sample n_samples_per_test_molecule
+        #at once using the same guidance (=> the guidance has shape: (1, guidance_size)).
+        #we need to repeat it n_samples_per_test_molecule (=> shape: (n_samples_per_test_molecule, guidance_size))
+        #the "not train_step" is not necessary but better have it
+        if(bs > guidance.size(0) and not train_step):
+            guidance = guidance.repeat((bs, 1))
+
+        #we put the production of X, E, y in a method as we need to 
+        #recycle the whole code later on if we want to calculate
+        #the same with the null token in place of the guidance.
+        def produce_XEy(noisy_data, extra_data, guidance = None):
+            #X      = transformer output which uses guidance (if any)
+            #X_null = transformer output which uses the null token
+            X = noisy_data['X_t'].clone().float()
+            E = noisy_data['E_t'].clone().float()
+            y = noisy_data['y_t'].clone().float()
+
+            if(guidance != None):
+                if(self.cfg.guidance.guidance_medium in ['y', 'both']):
+                    g_y = guidance
+
+                    #adds the guidance
+                    y   = torch.hstack((y, g_y)).float()
+                
+                if(self.cfg.guidance.guidance_medium in ['XE', 'both']):
+                    n  = extra_data.X.size(1) #number of nodes
+
+                    #spreads the guidance on all noses
+                    #g_X must have size (bs, n, features)
+                    #g_E must have size (bs, n, n, features)
+                    g_X = torch.reshape(guidance, shape = (bs,    1, -1)).repeat((1, n,    1))
+                    g_E = torch.reshape(guidance, shape = (bs, 1, 1, -1)).repeat((1, n, n, 1))
+                    
+                    #adds the guidance
+                    X   = torch.cat((X, g_X), dim=-1)
+                    E   = torch.cat((E, g_E), dim=-1)
+
+            #we finally add the extra data as requested
+            X = torch.cat((X, extra_data.X), dim=2).float()
+            E = torch.cat((E, extra_data.E), dim=3).float()
+            y = torch.hstack((y, extra_data.y)).float()
+
+            return X, E, y
+
+        X, E, y = produce_XEy(noisy_data, extra_data, guidance)
+
+        #p(x_0|x_t, guidance)
+        out = self.model(X, E, y, node_mask)
+
+        if(self.cfg.guidance.loss == 'crossentropy'):
+            if(train_step == False and self.cfg.guidance.s > 1):
+                #first of all, we need to calculate p(x_0|x_t, None) as well:
+                X_null, E_null, y_null = produce_XEy(noisy_data, extra_data, cf_null_token)
+                out_null = self.model(X_null, E_null, y_null, node_mask)
+
+                out.X = out_null.X + self.cfg.guidance.s*(out.X - out_null.X)
+                out.E = out_null.E + self.cfg.guidance.s*(out.E - out_null.E)
+            
+            #if the loss is a crossentropy, we are done here.
+            #the raw outputs are the only thing we need.
+            return utils.PlaceHolder(X = out.X, E = out.E, y = out.y).mask(node_mask)
+        elif(self.cfg.guidance.loss in ['kl', 'nll']):
+            #convert to log_softmax. Will be normalized later
+            out.X = torch.log_softmax(out.X, dim=-1)
+            out.E = torch.log_softmax(out.E, dim=-1)
+
+            if(train_step or self.cfg.guidance.s <= 1):
+                #s <= 1 means that we either do not want to use guidance at all
+                #OR we want to use the ORIGINAL VQ loss. In either case, there
+                #is no need to calculate the loss with the null token
+
+                #we assume that the model outputs the UNNORMALIZED log probs.
+                #Thus, we normalize them back.
+                out_X = out.X - torch.logsumexp(out.X, dim=-1, keepdim=True)
+                out_E = out.E - torch.logsumexp(out.E, dim=-1, keepdim=True)
+
+                return utils.PlaceHolder(X = out_X, E = out_E, y = out.y).mask(node_mask)
+            else:
+                #first of all, we need to calculate p(x_0|x_t, None) as well:
+                X_null, E_null, y_null = produce_XEy(noisy_data, extra_data, cf_null_token)
+                out_null = self.model(X_null, E_null, y_null, node_mask)
+
+                out_null.X = torch.log_softmax(out_null.X, dim=-1)
+                out_null.E = torch.log_softmax(out_null.E, dim=-1)
+
+                probX0 = out_null.X + self.cfg.guidance.s*(out.X - out_null.X)
+                probX0 = probX0 - torch.logsumexp(probX0, dim=-1, keepdim=True)
+                
+                probE0 = out_null.E + self.cfg.guidance.s*(out.E - out_null.E)
+                probE0 = probE0 - torch.logsumexp(probE0, dim=-1, keepdim=True)
+
+                return utils.PlaceHolder(X = probX0, E = probE0, y = out.y).mask(node_mask)
+        else:
+            raise NotImplementedError("ERROR: unimplemented loss")
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
-                     save_final: int, num_nodes=None):
+                     save_final: int, num_nodes=None, guidance=None):
         """
         :param batch_id: int
         :param batch_size: int
@@ -509,6 +1202,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         z_T = diffusion_utils.sample_discrete_feature_noise(limit_dist=self.limit_dist, node_mask=node_mask)
         X, E, y = z_T.X, z_T.E, z_T.y
 
+        if(guidance == None):
+            guidance = self.cf_null_token.repeat((batch_size, 1))
+
         assert (E == torch.transpose(E, 1, 2)).all()
         assert number_chain_steps < self.T
         chain_X_size = torch.Size((number_chain_steps, keep_chain, X.size(1)))
@@ -525,7 +1221,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             t_norm = t_array / self.T
 
             # Sample z_s
-            sampled_s, discrete_sampled_s = self.sample_p_zs_given_zt(s_norm, t_norm, X, E, y, node_mask)
+            sampled_s, discrete_sampled_s = self.sample_p_zs_given_zt(s_norm, t_norm, X, E, y, node_mask, g_T = guidance)
             X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
 
             # Save the first keep_chain graphs
@@ -576,7 +1272,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                     _ = self.visualization_tools.visualize_chain(result_path,
                                                                  chain_X[:, i, :].numpy(),
                                                                  chain_E[:, i, :].numpy())
-                self.print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
+                self.print('\r{}/{} complete'.format(i+1, num_molecules), end=''""", flush=True""")
             self.print('\nVisualizing molecules...')
 
             # Visualize the final molecules
@@ -588,7 +1284,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         return molecule_list
 
-    def sample_p_zs_given_zt(self, s, t, X_t, E_t, y_t, node_mask):
+    def sample_p_zs_given_zt(self, s, t, X_t, E_t, y_t, node_mask, g_T = None):
         """Samples from zs ~ p(zs | zt). Only used during sampling.
            if last_step, return the graph prediction as well"""
         bs, n, dxs = X_t.shape
@@ -604,11 +1300,16 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # Neural net predictions
         noisy_data = {'X_t': X_t, 'E_t': E_t, 'y_t': y_t, 't': t, 'node_mask': node_mask}
         extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
+        pred = self.forward(noisy_data, extra_data, node_mask, g_T)
 
         # Normalize predictions
-        pred_X = F.softmax(pred.X, dim=-1)               # bs, n, d0
-        pred_E = F.softmax(pred.E, dim=-1)               # bs, n, n, d0
+        if(self.cfg.guidance.loss == 'crossentropy'):
+            # Normalize predictions
+            pred_X = F.softmax(pred.X, dim=-1)               # bs, n, d0
+            pred_E = F.softmax(pred.E, dim=-1)               # bs, n, n, d0
+        else:
+            pred_X = torch.exp(pred.X)
+            pred_E = torch.exp(pred.E)
 
         p_s_and_t_given_0_X = diffusion_utils.compute_batched_over0_posterior_distribution(X_t=X_t,
                                                                                            Qt=Qt.X,

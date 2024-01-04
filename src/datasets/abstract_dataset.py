@@ -100,6 +100,8 @@ class AbstractDatasetInfos:
         self.nodes_dist = DistributionNodes(n_nodes)
 
     def compute_input_output_dims(self, datamodule, extra_features, domain_features):
+        cfg = datamodule.cfg
+        
         example_batch = next(iter(datamodule.train_dataloader()))
         ex_dense, node_mask = utils.to_dense(example_batch.x, example_batch.edge_index, example_batch.edge_attr,
                                              example_batch.batch)
@@ -117,6 +119,17 @@ class AbstractDatasetInfos:
         self.input_dims['X'] += ex_extra_molecular_feat.X.size(-1)
         self.input_dims['E'] += ex_extra_molecular_feat.E.size(-1)
         self.input_dims['y'] += ex_extra_molecular_feat.y.size(-1)
+
+        if(example_batch.guidance is not None):
+            guidance_sz = example_batch.guidance.size(-1)
+            
+            if(cfg.guidance.guidance_medium in ['y', 'both']):
+                self.input_dims['y'] += guidance_sz
+            if(cfg.guidance.guidance_medium in ['XE', 'both']):
+                self.input_dims['X'] += guidance_sz
+                self.input_dims['E'] += guidance_sz
+
+            self.input_dims['guidance'] = guidance_sz
 
         self.output_dims = {'X': example_batch['x'].size(1),
                             'E': example_batch['edge_attr'].size(1),

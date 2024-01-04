@@ -160,3 +160,5 @@ data
 *.dat
 *.cpython-39.pyc
 *.pyc
+.vscode/settings.json
+*.clean

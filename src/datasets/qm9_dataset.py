@@ -15,9 +15,15 @@ from torch_geometric.utils import subgraph
 
 import src.utils as utils
 from src.datasets.abstract_dataset import MolecularDataModule, AbstractDatasetInfos
+from src.datasets.guided_data import GuidedInMemoryDataset
 from src.analysis.rdkit_functions import mol2smiles, build_molecule_with_partial_charges
 from src.analysis.rdkit_functions import compute_molecular_metrics
 
+HAR2EV = 27.211386246
+KCALMOL2EV = 0.04336414
+
+conversion = torch.tensor([1., 1., HAR2EV, HAR2EV, HAR2EV, 1., HAR2EV, HAR2EV, HAR2EV, HAR2EV, HAR2EV,
+                           1., KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, 1., 1., 1.])
 
 def files_exist(files) -> bool:
     # NOTE: We return `False` in case `files` is empty, leading to a
@@ -34,19 +40,19 @@ def to_list(value: Any) -> Sequence:
 
 class RemoveYTransform:
     def __call__(self, data):
-        data.y = torch.zeros((1, 0), dtype=torch.float)
+        data.guidance = torch.zeros((1, 0), dtype=torch.float)
         return data
 
 
 class SelectMuTransform:
     def __call__(self, data):
-        data.y = data.y[..., :1]
+        data.guidance = data.guidance[..., :1]
         return data
 
 
 class SelectHOMOTransform:
     def __call__(self, data):
-        data.y = data.y[..., 1:]
+        data.guidance = data.guidance[..., 1:]
         return data
 
 
@@ -135,6 +141,9 @@ class QM9Dataset(InMemoryDataset):
 
         target_df = pd.read_csv(self.split_paths[self.file_idx], index_col=0)
         target_df.drop(columns=['mol_id'], inplace=True)
+        target = torch.tensor(target_df.values, dtype=torch.float)
+        target = torch.cat([target[:, 3:], target[:, :3]], dim=-1)
+        target = target * conversion.view(1, -1)
 
         with open(self.raw_paths[-1], 'r') as f:
             skip = [int(x.split()[0]) - 1 for x in f.read().split('\n')[9:-2]]
@@ -170,6 +179,9 @@ class QM9Dataset(InMemoryDataset):
             x = F.one_hot(torch.tensor(type_idx), num_classes=len(types)).float()
             y = torch.zeros((1, 0), dtype=torch.float)
 
+            guidance = target[target_df.index.get_loc(i)].unsqueeze(0)
+            guidance = torch.hstack((guidance[..., :1], guidance[..., 2:3]))         # mu, homo
+
             if self.remove_h:
                 type_idx = torch.tensor(type_idx).long()
                 to_keep = type_idx > 0
@@ -179,7 +191,8 @@ class QM9Dataset(InMemoryDataset):
                 # Shift onehot encoding to match atom decoder
                 x = x[:, 1:]
 
-            data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, idx=i)
+            data = GuidedInMemoryDataset(x=x, edge_index=edge_index, edge_attr=edge_attr, 
+                                         y=y, idx=i, guidance=guidance)
 
             if self.pre_filter is not None and not self.pre_filter(data):
                 continue
@@ -196,13 +209,12 @@ class QM9DataModule(MolecularDataModule):
         self.datadir = cfg.dataset.datadir
         self.remove_h = cfg.dataset.remove_h
 
-        target = getattr(cfg.general, 'guidance_target', None)
-        regressor = getattr(self, 'regressor', None)
-        if regressor and target == 'mu':
+        target = getattr(cfg.guidance, 'guidance_target', None)
+        if target == 'mu':
             transform = SelectMuTransform()
-        elif regressor and target == 'homo':
+        elif target == 'homo':
             transform = SelectHOMOTransform()
-        elif regressor and target == 'both':
+        elif target == 'both':
             transform = None
         else:
             transform = RemoveYTransform()
@@ -210,9 +222,9 @@ class QM9DataModule(MolecularDataModule):
         base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
         root_path = os.path.join(base_path, self.datadir)
         datasets = {'train': QM9Dataset(stage='train', root=root_path, remove_h=cfg.dataset.remove_h,
-                                        target_prop=target, transform=RemoveYTransform()),
+                                        target_prop=target, transform=transform),
                     'val': QM9Dataset(stage='val', root=root_path, remove_h=cfg.dataset.remove_h,
-                                      target_prop=target, transform=RemoveYTransform()),
+                                      target_prop=target, transform=transform),
                     'test': QM9Dataset(stage='test', root=root_path, remove_h=cfg.dataset.remove_h,
                                        target_prop=target, transform=transform)}
         super().__init__(cfg, datasets)
@@ -220,6 +232,7 @@ class QM9DataModule(MolecularDataModule):
 
 class QM9infos(AbstractDatasetInfos):
     def __init__(self, datamodule, cfg, recompute_statistics=False):
+        self.cfg = cfg
         self.remove_h = cfg.dataset.remove_h
         self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
 
