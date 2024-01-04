@@ -23,6 +23,7 @@ from diffusion_model_discrete import DiscreteDenoisingDiffusion
 from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
 
 
+
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
 
 
@@ -146,7 +147,7 @@ def main(cfg: DictConfig):
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
                         'extra_features': extra_features, 'domain_features': domain_features}
 
-    elif dataset_config["name"] in ['qm9', 'guacamol', 'moses']:
+    elif dataset_config["name"] in ['qm9', 'guacamol', 'moses', 'zinc250k']:
         from metrics.molecular_metrics import TrainMolecularMetrics, SamplingMolecularMetrics
         from metrics.molecular_metrics_discrete import TrainMolecularMetricsDiscrete
         from diffusion.extra_features_molecular import ExtraMolecularFeatures
@@ -169,6 +170,12 @@ def main(cfg: DictConfig):
             datamodule = moses_dataset.MosesDataModule(cfg)
             dataset_infos = moses_dataset.MOSESinfos(datamodule, cfg)
             train_smiles = None
+        elif dataset_config.name == 'zinc250k':
+            from datasets import zinc250k_dataset
+            datamodule = zinc250k_dataset.ZINC250KDataModule(cfg)
+            dataset_infos = zinc250k_dataset.ZINC250Kinfos(datamodule, cfg)
+            train_smiles = zinc250k_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
+                                                            dataset_infos=dataset_infos, evaluate_dataset=False)
         else:
             raise ValueError("Dataset not implemented")
 

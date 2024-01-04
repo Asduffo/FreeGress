@@ -36,7 +36,7 @@ import pandas as pd
 from rdkit.Chem import Crippen
 from src.metrics.sascorer import calculateScore
 from src.utils import graph2mol, clean_mol
-from src.metrics.properties import mw, penalized_logp, qed
+from src.metrics.properties import mw, penalized_logp, qed, drd2, mw
 
 from datasets import qm9_dataset
 
@@ -226,36 +226,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         if val_nll < self.best_val_nll:
             self.best_val_nll = val_nll
         self.print('Val loss: %.4f \t Best val loss:  %.4f\n' % (val_nll, self.best_val_nll))
-
-        self.val_counter += 1
-        if self.val_counter % self.cfg.general.sample_every_val == 0:
-            start = time.time()
-            samples_left_to_generate = self.cfg.general.samples_to_generate
-            samples_left_to_save = self.cfg.general.samples_to_save
-            chains_left_to_save = self.cfg.general.chains_to_save
-
-            samples = []
-
-            ident = 0
-            while samples_left_to_generate > 0:
-                bs = 2 * self.cfg.train.batch_size
-                to_generate = min(samples_left_to_generate, bs)
-                to_save = min(samples_left_to_save, bs)
-                chains_save = min(chains_left_to_save, bs)
-                samples.extend(self.sample_batch(batch_id=ident, batch_size=to_generate, num_nodes=None,
-                                                 save_final=to_save,
-                                                 keep_chain=chains_save,
-                                                 number_chain_steps=self.number_chain_steps))
-                ident += to_generate
-
-                samples_left_to_save -= to_save
-                samples_left_to_generate -= to_generate
-                chains_left_to_save -= chains_save
-            self.print("Computing sampling metrics...")
-            self.sampling_metrics.forward(samples, self.name, self.current_epoch, val_counter=-1, test=False,
-                                          local_rank=self.local_rank)
-            self.print(f'Done. Sampling took {time.time() - start:.2f} seconds\n')
-            print("Validation epoch end ends...")
 
     def on_test_epoch_start(self) -> None:
         self.print("Starting test...")
@@ -900,6 +870,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                                                                       pred_X=probX,
                                                                                       pred_E=probE,
                                                                                       node_mask=node_mask)
+        
+        probX[probX == .0] = 1e-6
+        probE[probE == .0] = 1e-6
+        limit_dist_X[limit_dist_X == .0] = 1e-6
+        limit_dist_E[limit_dist_E == .0] = 1e-6
 
         kl_distance_X = F.kl_div(input=probX.log(), target=limit_dist_X, reduction='none')
         kl_distance_E = F.kl_div(input=probE.log(), target=limit_dist_E, reduction='none')
@@ -907,14 +882,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                diffusion_utils.sum_except_batch(kl_distance_E)
 
     def compute_Lt(self, X, E, y, pred, noisy_data, node_mask, test):
-        if(self.cfg.guidance.loss == 'crossentropy'):
-            pred_probs_X = F.softmax(pred.X, dim=-1)
-            pred_probs_E = F.softmax(pred.E, dim=-1)
-            pred_probs_y = F.softmax(pred.y, dim=-1)
-        else:
-            pred_probs_X = torch.exp(pred.X)
-            pred_probs_E = torch.exp(pred.E)
-            pred_probs_y = torch.exp(pred.y)
+        #Note: these are not outputs from the NN => we need softmax regardless
+        pred_probs_X = F.softmax(pred.X, dim=-1)
+        pred_probs_E = F.softmax(pred.E, dim=-1)
+        pred_probs_y = F.softmax(pred.y, dim=-1)
 
         Qtb = self.transition_model.get_Qt_bar(noisy_data['alpha_t_bar'], self.device)
         Qsb = self.transition_model.get_Qt_bar(noisy_data['alpha_s_bar'], self.device)
@@ -936,6 +907,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                                                                                 pred_X=prob_pred.X,
                                                                                                 pred_E=prob_pred.E,
                                                                                                 node_mask=node_mask)
+        
+        prob_true.X[prob_true.X == 0.0] = 1e-6
+        prob_pred.X[prob_pred.X == 0.0] = 1e-6
+        prob_true.E[prob_true.E == 0.0] = 1e-6
+        prob_pred.E[prob_pred.E == 0.0] = 1e-6
+
         kl_x = (self.test_X_kl if test else self.val_X_kl)(prob_true.X, torch.log(prob_pred.X))
         kl_e = (self.test_E_kl if test else self.val_E_kl)(prob_true.E, torch.log(prob_pred.E))
         return self.T * (kl_x + kl_e)

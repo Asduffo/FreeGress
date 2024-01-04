@@ -162,3 +162,5 @@ data
 *.pyc
 .vscode/settings.json
 *.clean
+*.pkl.gx
+*.gz

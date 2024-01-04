@@ -1,0 +1,6 @@
+name: 'zinc250k'            #
+datadir: 'data/zinc250k/zinc250k_pyg/'
+remove_h: True
+random_subset: null
+pin_memory: False
+filter: True

@@ -1,0 +1,18 @@
+general:
+    name : 'regressor'
+    gpus : 1
+    wandb: 'online'
+    remove_h: True
+    target: 'both'                    # 'mu', 'homo', 'both', 'no-target'
+train:
+    n_epochs: 1200
+    batch_size: 512
+    save_model: True
+    ckpt_every_n_train_steps: 601
+model:
+    n_layers: 5
+    lambda_train: [2, 0]
+    extra_features: null
+guidance:
+    n_samples_per_test_molecule: 10
+    n_test_molecules_to_sample: 100

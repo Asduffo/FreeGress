@@ -1,0 +1,35 @@
+# @package _global_
+general:
+    name : 'logp_p01_lay12'
+    gpus : 1
+    wandb: 'online'
+    remove_h: True
+    target: 'logp'                    # 'mu', 'homo', 'both', 'no-target'
+    sample_every_val: 9999
+    samples_to_generate: 10
+    samples_to_save: 10
+    log_every_steps: 639
+    final_model_samples_to_generate: 10
+    final_model_samples_to_save: 10
+    check_val_every_n_epochs: 25
+train:
+    n_epochs: 1000
+    batch_size: 256
+    save_model: True
+    ckpt_every_n_train_steps: 25
+model:
+    n_layers: 12
+    lambda_train: [2, 0]
+    extra_features: null
+    hidden_mlp_dims: { 'X': 256, 'E': 128, 'y': 256}
+    hidden_dims: { 'dx': 256, 'de': 64, 'dy': 128, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 256}
+guidance:
+    n_samples_per_test_molecule: 2
+    n_test_molecules_to_sample: 2
+    test_thresholds: {
+                      'logp' : [5, 99999],
+                      'mw'   : [150, 99999]} 
+    guidance_target: 'logp'
+    build_with_partial_charges: False
+    guidance_properties_list: ['logp']
+    include_split: True
