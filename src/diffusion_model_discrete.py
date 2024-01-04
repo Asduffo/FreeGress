@@ -907,9 +907,14 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                diffusion_utils.sum_except_batch(kl_distance_E)
 
     def compute_Lt(self, X, E, y, pred, noisy_data, node_mask, test):
-        pred_probs_X = F.softmax(pred.X, dim=-1)
-        pred_probs_E = F.softmax(pred.E, dim=-1)
-        pred_probs_y = F.softmax(pred.y, dim=-1)
+        if(self.cfg.guidance.loss == 'crossentropy'):
+            pred_probs_X = F.softmax(pred.X, dim=-1)
+            pred_probs_E = F.softmax(pred.E, dim=-1)
+            pred_probs_y = F.softmax(pred.y, dim=-1)
+        else:
+            pred_probs_X = torch.exp(pred.X)
+            pred_probs_E = torch.exp(pred.E)
+            pred_probs_y = torch.exp(pred.y)
 
         Qtb = self.transition_model.get_Qt_bar(noisy_data['alpha_t_bar'], self.device)
         Qsb = self.transition_model.get_Qt_bar(noisy_data['alpha_s_bar'], self.device)
