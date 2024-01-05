@@ -35,6 +35,8 @@ from rdkit.Chem import Crippen
 from src.metrics.sascorer import calculateScore
 from src.utils import graph2mol, clean_mol
 
+from datasets import qm9_dataset, zinc_250k
+
 class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
                  domain_features, guidance_model=None, load_model=False):
@@ -174,7 +176,10 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
             final_uniqueness = 0
             print("final_uniqueness = 0 due to no uniques")
 
+        #Old method to get the dataset training smiles
+        """
         #opens the training set smiles
+        
         #path = os.path.join(os.path.dirname(os.getcwd()), self.cfg.dataset.datadir, "/raw/new_train.smiles")
         path = "/DiGress/" + self.cfg.dataset.datadir + "raw/new_train.smiles"
         print("opening ", path)
@@ -183,6 +188,18 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
         # reading the file
         data                     = my_file.read()
         train_dataset_smiles     = data.split("\n")
+        """
+
+        #new method (DELETE ME IF YOU USE THE OLD METHOD)
+        if(self.cfg.dataset.name == 'qm9'):
+            train_dataset_smiles = qm9_dataset.get_train_smiles(cfg=self.cfg, train_dataloader=None,
+                                                        dataset_infos=self.dataset_infos, evaluate_dataset=False)
+        elif(self.cfg.dataset.name == 'zinc250k'):
+            train_dataset_smiles = zinc_250k.get_train_smiles(cfg=self.cfg, train_dataloader=None,
+                                                        dataset_infos=self.dataset_infos, evaluate_dataset=False)
+        else:
+            print("TODO: implement get_train_smiles for other datasets")
+            
         train_dataset_smiles_set = set(train_dataset_smiles)
         print("There are ", len(train_dataset_smiles_set), " smiles in the training set")
 
