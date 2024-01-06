@@ -127,6 +127,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         ##################################################################################
 
+        if(input_dims['guidance'] != None): self.gdim = input_dims['guidance']
+        else:                               self.gdim = 0
+
         #this will be used as the guidance when we need to calculate p(G_{t-1}|G_t) without the guidance
         if(self.cfg.guidance.trainable_cf == True):
             self.cf_null_token = torch.nn.parameter.Parameter(torch.randn(size = (1, self.gdim)))
@@ -370,10 +373,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         #new method (DELETE ME IF YOU USE THE OLD METHOD)
         if(self.cfg.dataset.name == 'qm9'):
             train_dataset_smiles = qm9_dataset.get_train_smiles(cfg=self.cfg, train_dataloader=None,
-                                                        dataset_infos=self.dataset_infos, evaluate_dataset=False)
+                                                        dataset_infos=self.dataset_info, evaluate_dataset=False)
         elif(self.cfg.dataset.name == 'zinc250k'):
             train_dataset_smiles = zinc_250k.get_train_smiles(cfg=self.cfg, train_dataloader=None,
-                                                        dataset_infos=self.dataset_infos, evaluate_dataset=False)
+                                                        dataset_infos=self.dataset_info, evaluate_dataset=False)
         else:
             print("TODO: implement get_train_smiles for other datasets")
 
@@ -477,11 +480,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 print("GetConformer failed")
                 continue
 
-            if(self.cfg.guidance.include_split == False):
-                mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
-                if(len(mol_frags) > 1):
+            
+            mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+            if(len(mol_frags) > 1):
+                split_molecules = split_molecules + 1
+                if(self.cfg.guidance.include_split == False):
                     print("Ignoring a split molecule")
-                    split_molecules = split_molecules + 1
                     continue
 
             ##########################################################
@@ -651,7 +655,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 outputs        = curr_numerical.unsqueeze(1)
                 binary_outputs = curr_binary.unsqueeze(1)
             else:
-                print("outputs", outputs)
                 print("binary_outputs", binary_outputs)
                 outputs        = torch.hstack((outputs, curr_numerical.unsqueeze(1)))
                 binary_outputs = torch.hstack((binary_outputs, curr_binary.unsqueeze(1)))
@@ -1349,3 +1352,31 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         extra_y = torch.cat((extra_y, t), dim=1)
 
         return utils.PlaceHolder(X=extra_X, E=extra_E, y=extra_y)
+
+    def save_cond_samples(self, samples, target, file_path):
+        cond_results = {'smiles': [], 'input_targets': target}
+        invalid = 0
+        disconnected = 0
+
+        print("\tConverting conditionally generated molecules to SMILES ...")
+        for sample in samples:
+            mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder)
+            smile = mol2smiles(mol)
+            if smile is not None:
+                cond_results['smiles'].append(smile)
+                mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+                if len(mol_frags) > 1:
+                    print("Disconnected molecule", mol, mol_frags)
+                    disconnected += 1
+            else:
+                print("Invalid molecule obtained.")
+                invalid += 1
+
+        print("Number of invalid molecules", invalid)
+        print("Number of disconnected molecules", disconnected)
+
+        # save samples
+        with open(file_path, 'wb') as f:
+            pickle.dump(cond_results, f)
+
+        return cond_results
