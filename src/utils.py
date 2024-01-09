@@ -159,12 +159,13 @@ import torch.nn.functional as F
 
 
 
-def clean_mol(mol):
+def clean_mol(mol, uncharge=True):
     if(isinstance(mol, str)):
         mol = Chem.MolFromSmiles(mol)
 
     Chem.RemoveStereochemistry(mol)
-    mol = rdMolStandardize.Uncharger().uncharge(mol)
+    if(uncharge):
+        mol = rdMolStandardize.Uncharger().uncharge(mol)
     Chem.SanitizeMol(mol)
     
     return mol
@@ -190,12 +191,41 @@ def graph2mol(data, atom_decoder):
     reconstructed_mol = build_molecule(atom_types, edge_types, atom_decoder)
     return reconstructed_mol
 
-def mol2graph(mol, types, bonds, i, original_smiles = None, estimate_guidance = True):
+def mol2graph(mol, types, bonds, i, original_smiles = None, estimate_guidance = True, build_with_charges = False):
     N = mol.GetNumAtoms()
 
     type_idx = []
     for atom in mol.GetAtoms():
-        type_idx.append(types[atom.GetSymbol()])
+        atom_symbol = atom.GetSymbol()
+
+        #if there are some atoms we may want to keep track of the formal charges
+        #(either positive, negative, or both)
+        if(build_with_charges):
+            #gets the atom's formal charge
+            atom_charge = atom.GetFormalCharge()
+
+            #if the charge is not neutral
+            if(atom_charge != 0):
+                #this is necessary, as the sign "+" is lost when converting
+                #atom_charge > 0 to a string. If charge < 0, the "-" is already embedded
+                sign = ""
+                if(atom_charge > 0):
+                    sign = "+"
+
+                #if the charge is not neutral, then its string in
+                #the "types" dictionary is of the form <atom_symbol><formal charge>
+                actual_atom_symbol = atom_symbol + sign + str(atom_charge)
+                
+                #check if the actual_atom_symbol is in the types dictionary.
+                #if present, it means that we want to keep track of that
+                #non-neutral version of the atom. Otherwise, we do not keep
+                #the molecule.
+                if(actual_atom_symbol in types):
+                    atom_symbol = actual_atom_symbol
+                else:
+                    return None
+        
+        type_idx.append(types[atom_symbol])
 
     row, col, edge_type = [], [], []
     for bond in mol.GetBonds():
@@ -222,10 +252,10 @@ def mol2graph(mol, types, bonds, i, original_smiles = None, estimate_guidance = 
     guidance = None
     if(estimate_guidance):
         guidance = torch.zeros((1, 5))
-        estimated_plogp = penalized_logp(mol)
+        estimated_plogp = -1 #penalized_logp(mol)
         estimated_qed   = qed(original_smiles)
         estimated_mw    = rdMolDescriptors.CalcExactMolWt(mol)
-        estimated_sas   = calculateScore(mol)
+        estimated_sas   = -1 #calculateScore(mol)
         estimated_logp  = Crippen.MolLogP(mol)
         
         guidance[0, 0] = estimated_plogp

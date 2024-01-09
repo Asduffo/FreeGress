@@ -134,11 +134,15 @@ def main(cfg: DictConfig):
         train_metrics = TrainAbstractMetricsDiscrete() if cfg.model.type == 'discrete' else TrainAbstractMetrics()
         visualization_tools = NonMolecularVisualization()
 
-        if cfg.model.type == 'discrete' and cfg.model.extra_features is not None:
-            extra_features = ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)
+        if cfg.model.extra_features is not None:
+            if(cfg.model.extra_features == "domain_only"):
+                extra_features = DummyExtraFeatures()
+            else:
+                extra_features = ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)
+            domain_features = ExtraMolecularFeatures(dataset_infos=dataset_infos)
         else:
             extra_features = DummyExtraFeatures()
-        domain_features = DummyExtraFeatures()
+            domain_features = DummyExtraFeatures()
 
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)

@@ -69,7 +69,7 @@ class SelectLogPTransform:
         data.guidance = data.guidance[..., 4:5]
         return data
 
-atom_decoder = ['C', 'N', 'O', 'F', 'B', 'Br', 'Cl', 'I', 'P', 'S'] 
+atom_decoder = ['C', 'N', 'O', 'F', 'B', 'Br', 'Cl', 'I', 'P', 'S', 'N+1', 'O-1']
 
 class ZINC250KDataset(InMemoryDataset):
     raw_url = "https://raw.githubusercontent.com/aspuru-guzik-group/chemical_vae/master/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv"
@@ -159,6 +159,14 @@ class ZINC250KDataset(InMemoryDataset):
     def process(self):
         RDLogger.DisableLog('rdApp.*')
         
+        if(self.file_idx != 0):
+            root_dir                 = pathlib.Path(os.path.realpath(__file__)).parents[2]
+            train_path               = "/data/zinc250k/zinc250k_pyg/raw/new_train.smiles"
+            smiles_path              = str(root_dir) + train_path
+            my_file                  = open(smiles_path, "r")
+            data                     = my_file.read()
+            train_smiles             = data.split("\n")
+
         path = self.split_paths[self.file_idx]
         target_df = pd.read_csv(path)
         
@@ -172,26 +180,29 @@ class ZINC250KDataset(InMemoryDataset):
         unmatches = 0
         exceptions = 0
         string_unmatches = 0
+        n_already_present = 0
 
         print("Initial size: ", len(smiles_list))
 
+        build_with_charges = self.cfg.guidance.build_with_partial_charges == "full"
         #Qui è dove il VERO preprocessing avviene. Essenzialmente prende gli smiles
         #del training/val/test set (dipende da chi chiama il metodo) e processa
         #lo smiles per ottenere grafo + guida
         for i, original_smile in enumerate(tqdm(smiles_list)):
             #rimuove \n
-            self.cfg.guidance.build_with_partial_charges = False
             smiles_2D = rstrip1(original_smile, "\n")
 
             #otteniamo la molecola dallo smiles_2D ed eseguiamo il preprocessing
-            mol = clean_mol(smiles_2D)
+            mol = clean_mol(smiles_2D, (build_with_charges == False))
             smiles_2D = Chem.MolToSmiles(mol)
 
-            data = mol2graph(mol, self.types, self.bonds, i, smiles_2D)
+            data = mol2graph(mol, self.types, self.bonds, i, smiles_2D, True, build_with_charges)
 
             #questo succede se abbiamo un grafo vuoto (può succedere)
+            #o se un atomo conteneva cariche non neutrali quando non
+            #volevamo tenerne
             if(data == None):
-                print("Data is None")
+                #print("Data is None")
                 continue
 
             #controllo sanità del grafo generato. Qui viene effettivamente 
@@ -204,11 +215,17 @@ class ZINC250KDataset(InMemoryDataset):
                 reconstructed_mol        = graph2mol(data, self.atom_decoder)
 
                 try:
-                    reconstructed_mol    = clean_mol(reconstructed_mol)
+                    reconstructed_mol    = clean_mol(reconstructed_mol, (build_with_charges == False))
                     reconstructed_smiles = Chem.MolToSmiles(reconstructed_mol)
                 except:
                     exceptions = exceptions + 1
                     continue
+
+                #Skips if an element of the test set was also in the training set
+                if(self.file_idx != 0):
+                    if(reconstructed_smiles in train_smiles):
+                        n_already_present += 1
+                        continue
 
                 ###############################################################
                 #se gli smiles della molecola ricostruita e quello originale
@@ -219,15 +236,19 @@ class ZINC250KDataset(InMemoryDataset):
                     tmp_mol_smiles_2D            = reconstructed_mol
                     print_smiles                 = False
 
-                    tmp_mol_original_smile_sas   = calculateScore(tmp_mol_original_smile)
-                    tmp_mol_original_smile_plogp = penalized_logp(tmp_mol_original_smile)
+                    tmp_mol_original_smile_qed   = qed(tmp_mol_original_smile)
+                    tmp_mol_original_smile_logp  = Crippen.MolLogP(tmp_mol_original_smile)
+                    tmp_mol_original_smile_mw    = rdMolDescriptors.CalcExactMolWt(tmp_mol_original_smile)
 
-                    tmp_mol_smiles_2D_sas        = calculateScore(tmp_mol_smiles_2D)
-                    tmp_mol_smiles_2D_plogp      = penalized_logp(tmp_mol_smiles_2D)
+                    tmp_mol_smiles_2D_qed        = qed(tmp_mol_smiles_2D)
+                    tmp_mol_smiles_2D_logp       = Crippen.MolLogP(tmp_mol_smiles_2D)
+                    tmp_mol_smiles_2D_mw         = rdMolDescriptors.CalcExactMolWt(tmp_mol_smiles_2D)
 
-                    if(abs(tmp_mol_original_smile_sas - tmp_mol_smiles_2D_sas) > 1e-5):
+                    if(abs(tmp_mol_original_smile_qed - tmp_mol_smiles_2D_qed) > 1e-5):
                         print_smiles=True
-                    if(abs(tmp_mol_original_smile_plogp - tmp_mol_smiles_2D_plogp) > 1e-5):
+                    if(abs(tmp_mol_original_smile_logp - tmp_mol_smiles_2D_logp) > 1e-5):
+                        print_smiles=True
+                    if(abs(tmp_mol_original_smile_mw - tmp_mol_smiles_2D_mw) > 4):
                         print_smiles=True
                     
                     if(print_smiles):
@@ -235,6 +256,7 @@ class ZINC250KDataset(InMemoryDataset):
                         unmatches            = unmatches + 1
                 else:
                     string_unmatches = string_unmatches + 1
+
                 ###############################################################
 
                 if reconstructed_smiles is not None and smiles_2D == reconstructed_smiles: 
@@ -263,6 +285,7 @@ class ZINC250KDataset(InMemoryDataset):
         print("Total unmatches: ", unmatches)
         print("exceptions =", exceptions)
         print("string_unmatches: ", string_unmatches)
+        print("removed because already present in the training set: ", n_already_present)
 
         if self.filter_dataset:
             smiles_save_path = osp.join(pathlib.Path(self.raw_paths[0]).parent, f'new_{self.stage}.smiles')
@@ -329,6 +352,7 @@ class ZINC250Kinfos(AbstractDatasetInfos):
 
         #######################################################################
         #ZINC250k WITH filters (as in the other papers)
+        """
         self.num_atom_types = 10
         self.max_weight = 3000
 
@@ -363,9 +387,45 @@ class ZINC250Kinfos(AbstractDatasetInfos):
                                                   0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
                                                   0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
                                                   0.0000, 0.0000, 0.0000, 0.0000])
-
+        """
         #######################################################################
         
+        self.max_weight = 3000
+
+        #TODO: maybe the last 2 are wrong (since they are 'N+' and 'O-' )
+        self.valencies = [4, 3, 2, 1, 3, 1, 1, 1, 3, 2, 4, 1]
+
+        self.atom_weights = {1: 12, 2: 14, 3: 16, 4: 19, 5: 10.81, 6: 79.9,
+                             7: 35.45, 8: 126.9, 9: 30.97, 10: 30.07, 11: 14, 12: 16}
+        
+        self.n_nodes = torch.tensor([0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00, 0.0000e+00,
+                                     1.4545e-05, 2.4241e-05, 7.2723e-05, 3.0059e-04, 7.5632e-04, 2.9816e-03,
+                                     4.8821e-03, 7.2965e-03, 1.1524e-02, 1.7788e-02, 2.5860e-02, 3.5537e-02,
+                                     4.7876e-02, 5.9385e-02, 7.2107e-02, 8.2778e-02, 7.5113e-02, 8.4087e-02,
+                                     9.1970e-02, 9.0656e-02, 7.6320e-02, 6.1994e-02, 3.9241e-02, 3.0810e-02,
+                                     2.3979e-02, 1.8874e-02, 1.4637e-02, 1.0162e-02, 6.9377e-03, 3.9707e-03,
+                                     1.5466e-03, 5.1391e-04, 4.8482e-06])
+
+        self.node_types = torch.tensor([7.3843e-01, 1.0531e-01, 9.6436e-02, 1.4098e-02, 0.0000e+00, 2.2611e-03,
+                         7.5426e-03, 1.6223e-04, 2.2906e-05, 1.7853e-02, 1.3654e-02, 4.2335e-03])
+
+        self.edge_types = torch.tensor([9.0644e-01, 4.9232e-02, 5.9592e-03, 2.4122e-04, 3.8128e-02])
+
+        self.valency_distribution = torch.tensor([0.0000, 0.1156, 0.2933, 0.3520, 0.2311, 0.0032, 0.0048, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000,
+                                                  0.0000, 0.0000, 0.0000, 0.0000])
+        #######################################################################
+
         self.max_n_nodes = len(self.n_nodes) - 1 if self.n_nodes is not None else None
         
         if meta is None:
@@ -466,7 +526,7 @@ def compute_zinc_smiles(atom_decoder, train_dataloader, remove_h, use_partial_ch
             molecule_list.append([atom_types, edge_types])
 
         for l, molecule in enumerate(molecule_list):
-            if(use_partial_charges):
+            if(use_partial_charges == "partial"):
                 mol = build_molecule_with_partial_charges(molecule[0], molecule[1], atom_decoder)
             else:
                 mol = build_molecule(molecule[0], molecule[1], atom_decoder)
@@ -487,7 +547,7 @@ def compute_zinc_smiles(atom_decoder, train_dataloader, remove_h, use_partial_ch
     print("Number of disconnected molecules", disconnected)
     return mols_smiles
 
-"""
+""""""
 import hydra
 import omegaconf
 from omegaconf import DictConfig
@@ -496,17 +556,16 @@ def main(cfg: DictConfig):
     #ds = [ZINC250KDataset(s, os.path.join(os.path.abspath(__file__), "../../data/zinc250k")) for s in ["train", "val", "test"]]
     print(cfg)
 
-    cfg.dataset.name = 'zinc250k' 
-    cfg.dataset.datadir = 'data/zinc250k/zinc250k_pyg/'
-    cfg.dataset.remove_h =  True
-    cfg.dataset.random_subset = None
-    cfg.dataset.pin_memory = False
-    cfg.dataset.filter = True
+    cfg.dataset.name                        = 'zinc250k' 
+    cfg.dataset.datadir                     = 'data/zinc250k/zinc250k_pyg/'
+    cfg.dataset.remove_h                    =  True
+    cfg.dataset.random_subset               = None
+    cfg.dataset.pin_memory                  = False
+    cfg.dataset.filter                      = True
+    cfg.guidance.build_with_partial_charges = "full"
 
     datamodule = ZINC250KDataModule(cfg)
     dataset_infos = ZINC250Kinfos(datamodule, cfg, recompute_statistics = True)
 
 if __name__ == '__main__':
     main()
-
-"""

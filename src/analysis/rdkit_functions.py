@@ -136,10 +136,27 @@ def build_molecule(atom_types, edge_types, atom_decoder, verbose=False):
 
     mol = Chem.RWMol()
     for atom in atom_types:
-        a = Chem.Atom(atom_decoder[atom.item()])
+        atom_symbol = atom_decoder[atom.item()]
+
+        negative_charge = atom_symbol.find("-1")
+        positive_charge = atom_symbol.find("+1")
+
+        #if the atom is not neutrally charged:
+        if(negative_charge != -1 or positive_charge != -1):
+            #TODO: this may require a more robust handling if we
+            #will add more infos in the atom_decoder strings
+            formal_charge = int(atom_symbol[-2:])   #the formal charge are the last two characters
+            atom_symbol = atom_symbol[:-2]          #the string before the last 2 characters is the actual atomic symbol
+                                                    #(we MUST do this after getting formal_charge)
+        else:
+            formal_charge = 0
+
+        a = Chem.Atom(atom_symbol)
+        a.SetFormalCharge(formal_charge)
+
         mol.AddAtom(a)
         if verbose:
-            print("Atom added: ", atom.item(), atom_decoder[atom.item()])
+            print("Atom added: ", atom.item(), atom_symbol)
 
     edge_types = torch.triu(edge_types)
     all_bonds = torch.nonzero(edge_types)

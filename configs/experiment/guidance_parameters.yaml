@@ -1,3 +1,4 @@
+# @package _global_
 general:
     name : 'regressor'
     gpus : 1

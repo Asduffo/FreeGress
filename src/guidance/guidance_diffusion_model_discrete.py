@@ -514,7 +514,7 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
             ##########################################################
             try:
                 mol = raw_mol
-                mol = clean_mol(mol)
+                mol = clean_mol(mol, (self.cfg.guidance.build_with_partial_charges != "full"))
 
                 smile = Chem.MolToSmiles(mol)
                 print("Generated SMILES ", smile)
