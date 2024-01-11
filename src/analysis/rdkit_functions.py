@@ -79,7 +79,10 @@ class BasicMolecularMetrics(object):
         valid = []
         for graph in generated:
             atom_types, edge_types = graph
-            mol = build_molecule_with_partial_charges(atom_types, edge_types, self.dataset_info.atom_decoder)
+            if(self.dataset_info.cfg.guidance.build_with_partial_charges == "old_method"):
+                mol = build_molecule_with_partial_charges(atom_types, edge_types, self.dataset_info.atom_decoder)
+            else:
+                mol = build_molecule(atom_types, edge_types, self.dataset_info.atom_decoder)
             smiles = mol2smiles(mol)
             if smiles is not None:
                 try:

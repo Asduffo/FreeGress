@@ -102,6 +102,13 @@ class SiCE(CEPerClass):
     def __init__(self, i):
         super().__init__(i)
 
+class NiP1CE(CEPerClass):
+    def __init__(self, i):
+        super().__init__(i)
+
+class OxyM1CE(CEPerClass):
+    def __init__(self, i):
+        super().__init__(i)
 
 class NoBondCE(CEPerClass):
     def __init__(self, i):
@@ -134,7 +141,7 @@ class AtomMetricsCE(MetricCollection):
 
         class_dict = {'H': HydrogenCE, 'C': CarbonCE, 'N': NitroCE, 'O': OxyCE, 'F': FluorCE, 'B': BoronCE,
                       'Br': BrCE, 'Cl': ClCE, 'I': IodineCE, 'P': PhosphorusCE, 'S': SulfurCE, 'Se': SeCE,
-                      'Si': SiCE}
+                      'Si': SiCE, 'N+1': NiP1CE, 'O-1': OxyM1CE}
 
         metrics_list = []
         for i, atom_type in enumerate(atom_decoder):

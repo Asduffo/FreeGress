@@ -30,6 +30,6 @@ guidance:
                       'logp' : [5, 99999],
                       'mw'   : [150, 99999]} 
     guidance_target: 'logp'
-    build_with_partial_charges: "full"
+    build_with_partial_charges: "new_method"
     guidance_properties_list: ['logp']
     include_split: True

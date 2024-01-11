@@ -17,3 +17,4 @@ model:
 guidance:
     n_samples_per_test_molecule: 10
     n_test_molecules_to_sample: 100
+    build_with_partial_charges: "old_method"

@@ -443,7 +443,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         sample_smiles = []
 
         for sample in samples:
-            if(self.cfg.guidance.build_with_partial_charges):
+            if(self.cfg.guidance.build_with_partial_charges == "old_method"):
                 raw_mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder)
             else:
                 raw_mol = build_molecule(sample[0], sample[1], self.dataset_info.atom_decoder)
@@ -550,7 +550,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             ##########################################################
             try:
                 mol = raw_mol
-                mol = clean_mol(mol, (self.cfg.guidance.build_with_partial_charges != "full"))
+                mol = clean_mol(mol, (self.cfg.guidance.build_with_partial_charges == "no"))
 
                 smile = Chem.MolToSmiles(mol)
                 print("Generated SMILES ", smile)
@@ -714,7 +714,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         psi4.core.set_output_file('psi4_output.dat', False)
 
         for sample in samples:
-            mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder)
+            mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder) #DON'T TOUCH. THIS IS THE OLD METHOD
 
             try:
                 Chem.SanitizeMol(mol)
@@ -1360,7 +1360,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         print("\tConverting conditionally generated molecules to SMILES ...")
         for sample in samples:
-            mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder)
+            if(self.cfg.guidance.build_with_partial_charges == "old_method"):
+                mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder)
+            else:
+                mol = build_molecule(sample[0], sample[1], self.dataset_info.atom_decoder)
+            
             smile = mol2smiles(mol)
             if smile is not None:
                 cond_results['smiles'].append(smile)

@@ -184,7 +184,7 @@ class ZINC250KDataset(InMemoryDataset):
 
         print("Initial size: ", len(smiles_list))
 
-        build_with_charges = self.cfg.guidance.build_with_partial_charges == "full"
+        build_with_charges = self.cfg.guidance.build_with_partial_charges != "no"
         #Qui è dove il VERO preprocessing avviene. Essenzialmente prende gli smiles
         #del training/val/test set (dipende da chi chiama il metodo) e processa
         #lo smiles per ottenere grafo + guida
@@ -526,7 +526,7 @@ def compute_zinc_smiles(atom_decoder, train_dataloader, remove_h, use_partial_ch
             molecule_list.append([atom_types, edge_types])
 
         for l, molecule in enumerate(molecule_list):
-            if(use_partial_charges == "partial"):
+            if(use_partial_charges == "old_method"):
                 mol = build_molecule_with_partial_charges(molecule[0], molecule[1], atom_decoder)
             else:
                 mol = build_molecule(molecule[0], molecule[1], atom_decoder)
@@ -547,7 +547,7 @@ def compute_zinc_smiles(atom_decoder, train_dataloader, remove_h, use_partial_ch
     print("Number of disconnected molecules", disconnected)
     return mols_smiles
 
-""""""
+"""
 import hydra
 import omegaconf
 from omegaconf import DictConfig
@@ -562,10 +562,11 @@ def main(cfg: DictConfig):
     cfg.dataset.random_subset               = None
     cfg.dataset.pin_memory                  = False
     cfg.dataset.filter                      = True
-    cfg.guidance.build_with_partial_charges = "full"
+    cfg.guidance.build_with_partial_charges = "new_method"
 
     datamodule = ZINC250KDataModule(cfg)
     dataset_infos = ZINC250Kinfos(datamodule, cfg, recompute_statistics = True)
 
 if __name__ == '__main__':
     main()
+"""

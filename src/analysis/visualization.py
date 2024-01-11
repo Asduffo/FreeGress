@@ -37,7 +37,24 @@ class MolecularVisualization:
         for i in range(len(node_list)):
             if node_list[i] == -1:
                 continue
-            a = Chem.Atom(atom_decoder[int(node_list[i])])
+
+            atom_symbol = atom_decoder[int(node_list[i])]
+            negative_charge = atom_symbol.find("-1")
+            positive_charge = atom_symbol.find("+1")
+
+            #if the atom is not neutrally charged:
+            if(negative_charge != -1 or positive_charge != -1):
+                #TODO: this may require a more robust handling if we
+                #will add more infos in the atom_decoder strings
+                formal_charge = int(atom_symbol[-2:])   #the formal charge are the last two characters
+                atom_symbol = atom_symbol[:-2]          #the string before the last 2 characters is the actual atomic symbol
+                                                        #(we MUST do this after getting formal_charge)
+            else:
+                formal_charge = 0
+
+            a = Chem.Atom(atom_symbol)
+            a.SetFormalCharge(formal_charge)
+
             molIdx = mol.AddAtom(a)
             node_to_idx[i] = molIdx
 
