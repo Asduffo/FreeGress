@@ -38,7 +38,7 @@ from src.metrics.sascorer import calculateScore
 from src.utils import graph2mol, clean_mol
 from src.metrics.properties import mw, penalized_logp, qed, drd2, mw
 
-from datasets import qm9_dataset, zinc_250k
+from datasets import qm9_dataset, zinc250k_dataset
 
 class DiscreteDenoisingDiffusion(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
@@ -375,7 +375,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             train_dataset_smiles = qm9_dataset.get_train_smiles(cfg=self.cfg, train_dataloader=None,
                                                         dataset_infos=self.dataset_info, evaluate_dataset=False)
         elif(self.cfg.dataset.name == 'zinc250k'):
-            train_dataset_smiles = zinc_250k.get_train_smiles(cfg=self.cfg, train_dataloader=None,
+            train_dataset_smiles = zinc250k_dataset.get_train_smiles(cfg=self.cfg, train_dataloader=None,
                                                         dataset_infos=self.dataset_info, evaluate_dataset=False)
         else:
             print("TODO: implement get_train_smiles for other datasets")
