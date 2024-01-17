@@ -175,17 +175,21 @@ def main(cfg: DictConfig):
         elif dataset_config.name == 'zinc250k':
             datamodule = zinc250k_dataset.ZINC250KDataModule(cfg)
             dataset_infos = zinc250k_dataset.ZINC250Kinfos(datamodule, cfg)
-            train_smiles = None
+            train_smiles = zinc250k_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
+                                                            dataset_infos=dataset_infos, evaluate_dataset=False)
         else:
             raise ValueError("Dataset not implemented")
 
-        if cfg.model.type == 'discrete' and cfg.model.extra_features is not None:
-            extra_features = ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)
+        if cfg.model.extra_features is not None:
+            if(cfg.model.extra_features == "domain_only"):
+                extra_features = DummyExtraFeatures()
+            else:
+                extra_features = ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)
             domain_features = ExtraMolecularFeatures(dataset_infos=dataset_infos)
         else:
             extra_features = DummyExtraFeatures()
             domain_features = DummyExtraFeatures()
-
+            
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
 
@@ -200,8 +204,7 @@ def main(cfg: DictConfig):
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
-                        'extra_features': extra_features, 'domain_features': domain_features,
-                        }
+                        'extra_features': extra_features, 'domain_features': domain_features}
     else:
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
     
@@ -213,7 +216,6 @@ def main(cfg: DictConfig):
         # When resuming, we can override some parts of previous configuration
         cfg, _ = get_resume_adaptive(cfg, model_kwargs)
         os.chdir(cfg.general.resume.split('checkpoints')[0])
-
     
     utils.create_folders(cfg)
 
@@ -224,17 +226,6 @@ def main(cfg: DictConfig):
 
     callbacks = []
     if cfg.train.save_model:
-        """
-        checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
-                                              filename='{epoch}',
-                                              monitor='val/epoch_NLL',
-                                              save_top_k=5,
-                                              mode='min',
-                                              every_n_epochs=1)
-        last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
-        callbacks.append(last_ckpt_save)
-        callbacks.append(checkpoint_callback)
-        """
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
                                               monitor='val/epoch_NLL',
@@ -244,7 +235,7 @@ def main(cfg: DictConfig):
                                               every_n_epochs=cfg.train.ckpt_every_n_train_steps,
                                               save_on_train_epoch_end = True)
         callbacks.append(checkpoint_callback)
-
+ 
     if cfg.train.ema_decay > 0:
         ema_callback = utils.EMA(decay=cfg.train.ema_decay)
         callbacks.append(ema_callback)
@@ -252,7 +243,6 @@ def main(cfg: DictConfig):
     name = cfg.general.name
     if name == 'debug':
         print("[WARNING]: Run is called 'debug' -- it will run with fast_dev_run. ")
-
     
     if(isinstance(cfg.general.gpus, int)):
         gpus_ok = cfg.general.gpus >= 0
@@ -283,11 +273,8 @@ def main(cfg: DictConfig):
                       max_epochs=cfg.train.n_epochs,
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
                       fast_dev_run=cfg.general.name == 'debug',
-                      enable_progress_bar=True,
+                      enable_progress_bar = cfg.train.progress_bar,
                       callbacks=callbacks,
-
-                      #limit_train_batches=100,
-                      #limit_val_batches=50,
 
                       limit_test_batches = limit_test_batches,
                       log_every_n_steps=50 if name != 'debug' else 1,

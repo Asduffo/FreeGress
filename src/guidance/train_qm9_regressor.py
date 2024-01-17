@@ -72,7 +72,7 @@ def main(cfg: DictConfig):
 
     dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                             domain_features=domain_features)
-    dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': 2 if cfg.general.guidance_target == 'both' else 1}
+    dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': 2 if cfg.guidance.guidance_target == 'both' else 1}
 
     train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
 
@@ -136,7 +136,7 @@ def main(cfg: DictConfig):
                       check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
                       fast_dev_run=cfg.general.name == 'debug',
 
-                      enable_progress_bar=False,
+                      enable_progress_bar = cfg.train.progress_bar,
                       callbacks=callbacks,
                       logger=[])
 
