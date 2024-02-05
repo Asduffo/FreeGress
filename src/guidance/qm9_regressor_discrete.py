@@ -108,9 +108,9 @@ class Qm9RegressorDiscrete(pl.LightningModule):
         self.best_val_mae = 1e8
 
         self.val_loss_each = [MeanAbsoluteError().to(torch.device(self.args.general.gpus[0] if torch.cuda.is_available() else 'cpu')) for i
-                              in range(2)]
+                              in range(len(self.args.guidance.guidance_target))]
         self.test_loss_each = [MeanAbsoluteError().to(torch.device(self.args.general.gpus[0] if torch.cuda.is_available() else 'cpu')) for
-                               i in range(2)]
+                               i in range(len(self.args.guidance.guidance_target))]
         self.target_dict = {0: "mu", 1: "homo"}
 
     def training_step(self, data, i):
@@ -188,12 +188,12 @@ class Qm9RegressorDiscrete(pl.LightningModule):
             self.best_val_mae = val_mae
         print('Val loss: %.4f \t Best val loss:  %.4f\n' % (val_mae, self.best_val_mae))
 
-        if self.args.guidance.guidance_target == 'both':
+        if len(self.args.guidance.guidance_target) > 1: #guidance_target = 'both' in the old codebase
             print('Val loss each target:')
-            for i in range(2):
+            for i in range(len(self.args.guidance.guidance_target)): #range(2) in the old codebase
                 mae_each = self.val_loss_each[i].compute()
-                print(f"Target {self.target_dict[i]}: val_mae: {mae_each :.3f}")
-                to_log_each = {f"val_epoch/{self.target_dict[i]}_mae": mae_each}
+                print(f"Target {self.args.guidance.guidance_target[i]}: val_mae: {mae_each :.3f}")
+                to_log_each = {f"val_epoch/{self.args.guidance.guidance_target[i]}_mae": mae_each}
                 wandb.log(to_log_each)
 
         self.val_loss.reset()

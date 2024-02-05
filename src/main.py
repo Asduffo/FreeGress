@@ -42,12 +42,12 @@ def get_resume(cfg, model_kwargs):
     node_model_path             = cfg.guidance.node_model_path
     build_with_partial_charges  = cfg.guidance.build_with_partial_charges
     experiment_type             = cfg.guidance.experiment_type
-    guidance_properties_list    = cfg.guidance.guidance_properties_list
     test_thresholds             = cfg.guidance.test_thresholds
     wandb                       = cfg.general.wandb
     gpus                        = cfg.general.gpus
     include_split               = cfg.guidance.include_split
     node_inference_method       = cfg.guidance.node_inference_method
+    guidance_target             = cfg.guidance.guidance_target
     
     if cfg.model.type == 'discrete':
         model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
@@ -67,12 +67,12 @@ def get_resume(cfg, model_kwargs):
         cfg.guidance.node_model_path             = node_model_path
         cfg.guidance.build_with_partial_charges  = build_with_partial_charges
         cfg.guidance.experiment_type             = experiment_type
-        cfg.guidance.guidance_properties_list    = guidance_properties_list
         cfg.guidance.test_thresholds             = test_thresholds
         cfg.general.wandb                        = wandb
         cfg.general.gpus                         = gpus
         cfg.guidance.include_split               = include_split
         cfg.guidance.node_inference_method       = node_inference_method
+        cfg.guidance.guidance_target             = guidance_target
 
     cfg = utils.update_config_with_new_keys(cfg, saved_cfg)
     return cfg, model

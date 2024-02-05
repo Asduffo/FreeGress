@@ -35,7 +35,7 @@ def get_resume(cfg, model_kwargs):
     resume                      = cfg.general.test_only
     final_samples_to_generate   = cfg.general.final_model_samples_to_generate
     final_chains_to_save        = cfg.general.final_model_chains_to_save
-
+    guidance_target             = cfg.guidance.guidance_target
     batch_size                  = cfg.train.batch_size
     n_epochs                    = cfg.train.n_epochs
     n_test_molecules_to_sample  = cfg.guidance.n_test_molecules_to_sample
@@ -43,7 +43,6 @@ def get_resume(cfg, model_kwargs):
     node_model_path             = cfg.guidance.node_model_path
     build_with_partial_charges  = cfg.guidance.build_with_partial_charges
     experiment_type             = cfg.guidance.experiment_type
-    guidance_properties_list    = cfg.guidance.guidance_properties_list
     test_thresholds             = cfg.guidance.test_thresholds
     wandb                       = cfg.general.wandb
     gpus                        = cfg.general.gpus
@@ -67,10 +66,9 @@ def get_resume(cfg, model_kwargs):
         cfg.guidance.node_model_path             = node_model_path
         cfg.guidance.build_with_partial_charges  = build_with_partial_charges
         cfg.guidance.experiment_type             = experiment_type
-        cfg.guidance.guidance_properties_list    = guidance_properties_list
         cfg.guidance.test_thresholds             = test_thresholds
         cfg.general.wandb                        = wandb
-
+        cfg.guidance.guidance_target             = guidance_target
         cfg.general.gpus                         = gpus
         cfg.guidance.guidance_medium             = "NONE"
         cfg.guidance.lambda_guidance             = lambda_guidance

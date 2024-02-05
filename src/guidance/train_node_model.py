@@ -71,8 +71,7 @@ def main(cfg: DictConfig):
             datamodule = qm9_dataset.QM9DataModule(cfg)
             dataset_infos = qm9_dataset.QM9infos(datamodule=datamodule, cfg=cfg)
 
-            if(cfg.guidance.guidance_target in ['homo', 'mu']): input_size = 1
-            else:                                               input_size = 2
+            input_size = len(cfg.guidance.guidance_target)
 
             model = QM9NodeModel(cfg=cfg, dataset=datamodule,  dataset_infos = dataset_infos, input_size=input_size)
             
@@ -91,9 +90,8 @@ def main(cfg: DictConfig):
             dataset_infos = zinc250k_dataset.ZINC250Kinfos(datamodule, cfg)
             train_smiles = None
 
-            if(cfg.guidance.guidance_target in ['penalizedlogp', 'logp', 'qed', 'sas', 'mw']): input_size = 1
-            else:                                                                              input_size = 2
-
+            input_size = len(cfg.guidance.guidance_target)
+            
             model = QM9NodeModel(cfg=cfg, dataset_infos=dataset_infos,
                                  input_size=input_size)
         else:

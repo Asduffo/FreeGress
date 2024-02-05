@@ -72,7 +72,7 @@ def main(cfg: DictConfig):
 
     dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                             domain_features=domain_features)
-    dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': 2 if cfg.guidance.guidance_target == 'both' else 1}
+    dataset_infos.output_dims = {'X': 0, 'E': 0, 'y': len(cfg.guidance.guidance_target)}
 
     train_metrics = TrainMolecularMetricsDiscrete(dataset_infos)
 

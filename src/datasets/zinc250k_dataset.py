@@ -42,31 +42,25 @@ class RemoveYTransform:
         data.guidance = torch.zeros((1, 0), dtype=torch.float)
         return data
 
+class FeatureExtractorTransform:
+    def __init__(self, guidance_target):
+        self.guidance_target = guidance_target
 
-class SelectPenalizedLogPTransform:
     def __call__(self, data):
-        data.guidance = data.guidance[..., 0:1]
-        return data
-
-class SelectQEDTransform:
-    def __call__(self, data):
-        data.guidance = data.guidance[..., 1:2]
-        return data
-    
-class SelectMWTransform:
-    def __call__(self, data):
-        data.guidance = data.guidance[..., 2:3] / 100
-        return data
-
-class SelectSASTransform:
-    def __call__(self, data):
-        data.guidance = data.guidance[..., 3:4]
-        return data
-
-class SelectLogPTransform:
-    def __call__(self, data):
+        guidance = []
+        if 'penalizedlogp' in self.guidance_target:
+            guidance.append(data.guidance[..., 0:1])
+        if 'qed' in self.guidance_target:
+            guidance.append(data.guidance[..., 1:2])
+        if 'mw' in self.guidance_target:
+            guidance.append(data.guidance[..., 2:3] / 100)
+        if 'sas' in self.guidance_target:
+            guidance.append(data.guidance[..., 3:4])
+        if 'logp' in self.guidance_target:
+            guidance.append(data.guidance[..., 4:5])
         
-        data.guidance = data.guidance[..., 4:5]
+        data.guidance = torch.hstack(tuple(guidance))
+
         return data
 
 atom_decoder = ['C', 'N', 'O', 'F', 'B', 'Br', 'Cl', 'I', 'P', 'S', 'N+1', 'O-1']
@@ -305,22 +299,13 @@ class ZINC250KDataModule(MolecularDataModule):
 
         base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
         root_path = os.path.join(base_path, self.datadir)
-        
+
         target = getattr(cfg.guidance, 'guidance_target', None)
-        if target == 'penalizedlogp':
-            transform = SelectPenalizedLogPTransform()
-        elif target == 'qed':
-            transform = SelectQEDTransform()
-        elif target == 'mw':
-            transform = SelectMWTransform()
-        elif target == 'sas':
-            transform = SelectSASTransform()
-        elif target == 'logp':
-            transform = SelectLogPTransform()
-        elif target == 'both':
-            transform = None
-        else:
+        
+        if("NONE" in target):
             transform = RemoveYTransform()
+        else:
+            transform = FeatureExtractorTransform(target)
 
         datasets = {'train': ZINC250KDataset(stage='train', atom_decoder=self.atom_decoder, root=root_path, remove_h=cfg.dataset.remove_h,
                                         target_prop=target, transform=transform, filter_dataset = self.filter_dataset, cfg=cfg),

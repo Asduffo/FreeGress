@@ -249,7 +249,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         #checks if the current guidance element satisfies the required ranges
         if(self.cfg.guidance.experiment_type == 'accuracy'):
-            valid_properties = self.cfg.guidance.guidance_properties_list
+            valid_properties = self.cfg.guidance.guidance_target
             test_thresholds  = self.cfg.guidance.test_thresholds
 
             k = 0
@@ -269,14 +269,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         
         #loads self.node_model (only the first time because of the check self.node_model == None)
         if(self.node_model == None and self.cfg.guidance.node_model_path != None):
-            #actually unused (zinc ended up not using guidance_target='both')
-            if(self.cfg.guidance.guidance_target == 'both'):
-                if(self.cfg.dataset.name == 'zinc250k'):
-                    input_size = 2
-                else:
-                    input_size = 2
-            else:
-                input_size = 1
+            input_size = len(self.cfg.guidance_target)
 
             node_model_kwargs  = {'cfg': self.cfg, 'dataset_infos': self.dataset_info, 'input_size': input_size}
             self.node_model = QM9NodeModel.load_from_checkpoint(self.cfg.guidance.node_model_path, **node_model_kwargs)
@@ -312,8 +305,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                     number_chain_steps=self.number_chain_steps,
                                     guidance=target_properties)
         print(f'Sampling took {time.time() - start:.2f} seconds\n')
-        self.save_cond_samples(samples, target_properties, file_path=os.path.join(os.getcwd(), f'cond_smiles{i}.pkl'))
-
+        cond_results = self.save_cond_samples(samples, target_properties, file_path=os.path.join(os.getcwd(), f'cond_smiles{i}.pkl'))
 
         #######################################################################
         """
@@ -411,14 +403,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                    'final uniqueness': final_uniqueness})
         
     def cond_sample_metric(self, samples, input_properties):
-        if(self.cfg.guidance.experiment_type in ['new_method', 'accuracy']):
-            return self.accuracy_test(samples, input_properties)
-        else:
-            return self.original_test(samples, input_properties)
-
+        return self.accuracy_test(samples, input_properties)
     
     def accuracy_test(self, samples, input_properties):
-        valid_properties = self.cfg.guidance.guidance_properties_list
+        valid_properties = self.cfg.guidance.guidance_target
         test_thresholds  = self.cfg.guidance.test_thresholds
 
         if('mu' in valid_properties or 'homo' in valid_properties):
@@ -698,154 +686,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             wandb.log({"val_epoch/accuracy": accuracy})
 
         return mae
-
-
-    def original_test(self, samples, input_properties):
-        try:
-            import psi4
-        except ModuleNotFoundError:
-            print("PSI4 not found")
-        mols_dipoles = []
-        mols_homo = []
-
-        # Hardware side settings (CPU thread number and memory settings used for calculation)
-        psi4.set_num_threads(nthread=4)
-        psi4.set_memory("5GB")
-        psi4.core.set_output_file('psi4_output.dat', False)
-
-        for sample in samples:
-            mol = build_molecule_with_partial_charges(sample[0], sample[1], self.dataset_info.atom_decoder) #DON'T TOUCH. THIS IS THE OLD METHOD
-
-            try:
-                Chem.SanitizeMol(mol)
-            except:
-                print('invalid chemistry')
-                continue
-
-            # Coarse 3D structure optimization by generating 3D structure from SMILES
-            mol = Chem.AddHs(mol)
-            params = ETKDGv3()
-            params.randomSeed = 1
-            try:
-                EmbedMolecule(mol, params)
-            except Chem.rdchem.AtomValenceException:
-                print('invalid chemistry')
-                continue
-
-            # Structural optimization with MMFF (Merck Molecular Force Field)
-            try:
-                s = MMFFOptimizeMolecule(mol)
-                print(s)
-            except:
-                print('Bad conformer ID')
-                continue
-
-            try:
-                conf = mol.GetConformer()
-            except:
-                print("GetConformer failed")
-                continue
-
-            # Convert to a format that can be input to Psi4.
-            # Set charge and spin multiplicity (below is charge 0, spin multiplicity 1)
-
-            # Get the formal charge
-            fc = 'FormalCharge'
-            mol_FormalCharge = int(mol.GetProp(fc)) if mol.HasProp(fc) else Chem.GetFormalCharge(mol)
-
-            sm = 'SpinMultiplicity'
-            if mol.HasProp(sm):
-                mol_spin_multiplicity = int(mol.GetProp(sm))
-            else:
-                # Calculate spin multiplicity using Hund's rule of maximum multiplicity...
-                NumRadicalElectrons = 0
-                for Atom in mol.GetAtoms():
-                    NumRadicalElectrons += Atom.GetNumRadicalElectrons()
-                TotalElectronicSpin = NumRadicalElectrons / 2
-                SpinMultiplicity = 2 * TotalElectronicSpin + 1
-                mol_spin_multiplicity = int(SpinMultiplicity)
-
-            mol_input = "%s %s" % (mol_FormalCharge, mol_spin_multiplicity)
-            print(mol_input)
-            #mol_input = "0 1"
-
-            # Describe the coordinates of each atom in XYZ format
-            for atom in mol.GetAtoms():
-                mol_input += "\n " + atom.GetSymbol() + " " + str(conf.GetAtomPosition(atom.GetIdx()).x) \
-                             + " " + str(conf.GetAtomPosition(atom.GetIdx()).y) \
-                             + " " + str(conf.GetAtomPosition(atom.GetIdx()).z)
-
-            try:
-                molecule = psi4.geometry(mol_input)
-            except:
-                print('Can not calculate psi4 geometry')
-                continue
-
-            # Convert to a format that can be input to pyscf
-            # Set calculation method (functional) and basis set
-            level = "b3lyp/6-31G*"
-
-            # Calculation method (functional), example of basis set
-            # theory = ['hf', 'b3lyp']
-            # basis_set = ['sto-3g', '3-21G', '6-31G(d)', '6-31+G(d,p)', '6-311++G(2d,p)']
-
-            # Perform structural optimization calculations
-            print('Psi4 calculation starts!!!')
-            #energy, wave_function = psi4.optimize(level, molecule=molecule, return_wfn=True)
-            try:
-                energy, wave_function = psi4.energy(level, molecule=molecule, return_wfn=True)
-            except:
-                print("Psi4 did not converge")
-                continue
-
-            print('Chemistry information check!!!')
-
-            if self.cfg.guidance.guidance_target in ['mu', 'both']:
-                dip_x, dip_y, dip_z = wave_function.variable('SCF DIPOLE')[0],\
-                                      wave_function.variable('SCF DIPOLE')[1],\
-                                      wave_function.variable('SCF DIPOLE')[2]
-                dipole_moment = math.sqrt(dip_x**2 + dip_y**2 + dip_z**2) * 2.5417464519
-                print("Dipole moment", dipole_moment)
-                mols_dipoles.append(dipole_moment)
-
-            if self.cfg.guidance.guidance_target in ['homo', 'both']:
-                # Compute HOMO (Unit: au= Hartree）
-                LUMO_idx = wave_function.nalpha()
-                HOMO_idx = LUMO_idx - 1
-                homo = wave_function.epsilon_a_subset("AO", "ALL").np[HOMO_idx]
-
-                # convert unit from a.u. to ev
-                homo = homo * 27.211324570273
-                print("HOMO", homo)
-                mols_homo.append(homo)
-
-        num_valid_molecules = max(len(mols_dipoles), len(mols_homo))
-        print("Number of valid samples", num_valid_molecules)
-        self.num_valid_molecules += num_valid_molecules
-        self.num_total += len(samples)
-
-        mols_dipoles = torch.FloatTensor(mols_dipoles)
-        mols_homo = torch.FloatTensor(mols_homo)
-
-        if self.cfg.guidance.guidance_target == 'mu':
-            mae = self.cond_val(mols_dipoles.unsqueeze(1),
-                                input_properties.repeat(len(mols_dipoles), 1).cpu())
-
-        elif self.cfg.guidance.guidance_target == 'homo':
-            mae = self.cond_val(mols_homo.unsqueeze(1),
-                                input_properties.repeat(len(mols_homo), 1).cpu())
-
-        elif self.cfg.guidance.guidance_target == 'both':
-            properties = torch.hstack((mols_dipoles.unsqueeze(1), mols_homo.unsqueeze(1)))
-            mae = self.cond_val(properties,
-                                input_properties.repeat(len(mols_dipoles), 1).cpu())
-
-        print('Conditional generation metric:')
-        print(f'Epoch {self.current_epoch}: MAE: {mae}')
-        wandb.log({"val_epoch/conditional generation mae": mae,
-                   'Valid molecules': num_valid_molecules})
-        return mae
-
 
     def kl_prior(self, X, E, node_mask):
         """Computes the KL between q(z1 | x) and the prior p(z1) = Normal(0, 1).

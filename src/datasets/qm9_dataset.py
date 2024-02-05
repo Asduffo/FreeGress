@@ -43,16 +43,19 @@ class RemoveYTransform:
         data.guidance = torch.zeros((1, 0), dtype=torch.float)
         return data
 
+class FeatureExtractorTransform:
+    def __init__(self, guidance_target):
+        self.guidance_target = guidance_target
 
-class SelectMuTransform:
     def __call__(self, data):
-        data.guidance = data.guidance[..., :1]
-        return data
+        guidance = []
+        if 'mu' in self.guidance_target:
+            guidance.append(data.guidance[..., :1])
+        if 'homo' in self.guidance_target:
+            guidance.append(data.guidance[..., 1:])
+        
+        data.guidance = torch.hstack(tuple(guidance))
 
-
-class SelectHOMOTransform:
-    def __call__(self, data):
-        data.guidance = data.guidance[..., 1:]
         return data
 
 
@@ -210,12 +213,13 @@ class QM9DataModule(MolecularDataModule):
         self.remove_h = cfg.dataset.remove_h
 
         target = getattr(cfg.guidance, 'guidance_target', None)
-        if target == 'mu':
-            transform = SelectMuTransform()
-        elif target == 'homo':
-            transform = SelectHOMOTransform()
-        elif target == 'both':
+
+        if("NONE" in target):
+            transform = RemoveYTransform()
+        elif 'mu' in target and 'homo' in target:   #equivalent of 'both' in the old codebase, but it should work the same
             transform = None
+        elif 'mu' in target or 'homo' in target:
+            transform = FeatureExtractorTransform(cfg.guidance.guidance_target)
         else:
             transform = RemoveYTransform()
 

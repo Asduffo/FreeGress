@@ -45,7 +45,6 @@ def get_resume(cfg, model_kwargs):
     node_model_path             = cfg.guidance.node_model_path
     build_with_partial_charges  = cfg.guidance.build_with_partial_charges
     experiment_type             = cfg.guidance.experiment_type
-    guidance_properties_list    = cfg.guidance.guidance_properties_list
     test_thresholds             = cfg.guidance.test_thresholds
     wandb                       = cfg.general.wandb
     gpus                        = cfg.general.gpus
@@ -68,7 +67,6 @@ def get_resume(cfg, model_kwargs):
         cfg.guidance.node_model_path             = node_model_path
         cfg.guidance.build_with_partial_charges  = build_with_partial_charges
         cfg.guidance.experiment_type             = experiment_type
-        cfg.guidance.guidance_properties_list    = guidance_properties_list
         cfg.guidance.test_thresholds             = test_thresholds
         cfg.general.wandb                        = wandb
 
