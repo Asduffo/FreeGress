@@ -442,11 +442,11 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
                 print("GetConformer failed")
                 continue
 
-            if(self.cfg.guidance.include_split == False):
-                mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
-                if(len(mol_frags) > 1):
+            mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+            if(len(mol_frags) > 1):
+                split_molecules = split_molecules + 1
+                if(self.cfg.guidance.include_split == False):
                     print("Ignoring a split molecule")
-                    split_molecules = split_molecules + 1
                     continue
 
             ##########################################################
@@ -562,16 +562,6 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
                     binary_results_dict['penalizedlogp'].append(0)
                 numerical_results_dict['penalizedlogp'].append(plogp_estimate)
 
-            if 'logp' in valid_properties:
-                logp_estimate = Crippen.MolLogP(mol)
-
-                thresholds = test_thresholds['logp']
-                if(thresholds[0] <= logp_estimate and logp_estimate <= thresholds[1]):
-                    binary_results_dict['logp'].append(1)
-                else:
-                    binary_results_dict['logp'].append(0)
-                numerical_results_dict['logp'].append(logp_estimate)
-
             if 'qed' in valid_properties:
                 qed_estimate = qed(mol)
 
@@ -602,24 +592,35 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
                     binary_results_dict['sas'].append(0)
                 numerical_results_dict['sas'].append(sas_estimate)
 
+            if 'logp' in valid_properties:
+                logp_estimate = Crippen.MolLogP(mol)
+
+                thresholds = test_thresholds['logp']
+                if(thresholds[0] <= logp_estimate and logp_estimate <= thresholds[1]):
+                    binary_results_dict['logp'].append(1)
+                else:
+                    binary_results_dict['logp'].append(0)
+                numerical_results_dict['logp'].append(logp_estimate)
+
         num_valid_molecules = 0
         outputs = None
         binary_outputs = None
 
-        for tgt in valid_properties:
-            num_valid_molecules = max(num_valid_molecules, len(numerical_results_dict[tgt]))
+        for tgt in ['mu', 'homo', 'penalizedlogp', 'qed', 'mw', 'sas', 'logp']:
+            if tgt in valid_properties:
+                num_valid_molecules = max(num_valid_molecules, len(numerical_results_dict[tgt]))
 
-            curr_numerical = torch.FloatTensor(numerical_results_dict[tgt])
-            curr_binary    = torch.FloatTensor(binary_results_dict[tgt])
+                curr_numerical = torch.FloatTensor(numerical_results_dict[tgt])
+                curr_binary    = torch.FloatTensor(binary_results_dict[tgt])
 
-            if(outputs == None):
-                outputs        = curr_numerical.unsqueeze(1)
-                binary_outputs = curr_binary.unsqueeze(1)
-            else:
-                print("outputs", outputs)
-                print("binary_outputs", binary_outputs)
-                outputs        = torch.hstack((outputs, curr_numerical.unsqueeze(1)))
-                binary_outputs = torch.hstack((binary_outputs, curr_binary.unsqueeze(1)))
+                if(outputs == None):
+                    outputs        = curr_numerical.unsqueeze(1)
+                    binary_outputs = curr_binary.unsqueeze(1)
+                else:
+                    print("outputs", outputs)
+                    print("binary_outputs", binary_outputs)
+                    outputs        = torch.hstack((outputs, curr_numerical.unsqueeze(1)))
+                    binary_outputs = torch.hstack((binary_outputs, curr_binary.unsqueeze(1)))
         
         print("Number of valid samples", num_valid_molecules)
         self.num_valid_molecules += num_valid_molecules

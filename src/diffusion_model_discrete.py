@@ -467,7 +467,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             except:
                 print("GetConformer failed")
                 continue
-
             
             mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
             if(len(mol_frags) > 1):
@@ -589,16 +588,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                     binary_results_dict['penalizedlogp'].append(0)
                 numerical_results_dict['penalizedlogp'].append(plogp_estimate)
 
-            if 'logp' in valid_properties:
-                logp_estimate = Crippen.MolLogP(mol)
-
-                thresholds = test_thresholds['logp']
-                if(thresholds[0] <= logp_estimate and logp_estimate <= thresholds[1]):
-                    binary_results_dict['logp'].append(1)
-                else:
-                    binary_results_dict['logp'].append(0)
-                numerical_results_dict['logp'].append(logp_estimate)
-
             if 'qed' in valid_properties:
                 qed_estimate = qed(mol)
 
@@ -628,24 +617,36 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 else:
                     binary_results_dict['sas'].append(0)
                 numerical_results_dict['sas'].append(sas_estimate)
+            
+            if 'logp' in valid_properties:
+                logp_estimate = Crippen.MolLogP(mol)
+
+                thresholds = test_thresholds['logp']
+                if(thresholds[0] <= logp_estimate and logp_estimate <= thresholds[1]):
+                    binary_results_dict['logp'].append(1)
+                else:
+                    binary_results_dict['logp'].append(0)
+                numerical_results_dict['logp'].append(logp_estimate)
 
         num_valid_molecules = 0
         outputs = None
         binary_outputs = None
 
-        for tgt in valid_properties:
-            num_valid_molecules = max(num_valid_molecules, len(numerical_results_dict[tgt]))
+        for tgt in ['mu', 'homo', 'penalizedlogp', 'qed', 'mw', 'sas', 'logp']:
+            if tgt in valid_properties:
+                num_valid_molecules = max(num_valid_molecules, len(numerical_results_dict[tgt]))
 
-            curr_numerical = torch.FloatTensor(numerical_results_dict[tgt])
-            curr_binary    = torch.FloatTensor(binary_results_dict[tgt])
+                curr_numerical = torch.FloatTensor(numerical_results_dict[tgt])
+                curr_binary    = torch.FloatTensor(binary_results_dict[tgt])
 
-            if(outputs == None):
-                outputs        = curr_numerical.unsqueeze(1)
-                binary_outputs = curr_binary.unsqueeze(1)
-            else:
-                print("binary_outputs", binary_outputs)
-                outputs        = torch.hstack((outputs, curr_numerical.unsqueeze(1)))
-                binary_outputs = torch.hstack((binary_outputs, curr_binary.unsqueeze(1)))
+                if(outputs == None):
+                    outputs        = curr_numerical.unsqueeze(1)
+                    binary_outputs = curr_binary.unsqueeze(1)
+                else:
+                    print("outputs", outputs)
+                    print("binary_outputs", binary_outputs)
+                    outputs        = torch.hstack((outputs, curr_numerical.unsqueeze(1)))
+                    binary_outputs = torch.hstack((binary_outputs, curr_binary.unsqueeze(1)))
         
         print("Number of valid samples", num_valid_molecules)
         self.num_valid_molecules += num_valid_molecules
@@ -894,7 +895,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         #if we don't pass a guidance vector, we use the null guidance token:
         if(guidance is None):
             guidance = cf_null_token
-        elif(train_step and self.cfg.guidance.s > 1): #it has sense only if the guidance is not ENTIRELY equal to cf_null_token
+        elif(train_step and self.cfg.guidance.p_uncond > 0): #it has sense only if the guidance is not ENTIRELY equal to cf_null_token
             #proceeds to randomly mask the guidance
             #TODO: this likely will have to be fixed for text-based where
             #the null token is inplanted in the query itself (it's the "pad" token)
@@ -958,7 +959,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         out = self.model(X, E, y, node_mask)
 
         if(self.cfg.guidance.loss == 'crossentropy'):
-            if(train_step == False and self.cfg.guidance.s > 1):
+            if(train_step == False and self.cfg.guidance.s > 0):
                 #first of all, we need to calculate p(x_0|x_t, None) as well:
                 X_null, E_null, y_null = produce_XEy(noisy_data, extra_data, cf_null_token)
                 out_null = self.model(X_null, E_null, y_null, node_mask)
@@ -969,37 +970,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             #if the loss is a crossentropy, we are done here.
             #the raw outputs are the only thing we need.
             return utils.PlaceHolder(X = out.X, E = out.E, y = out.y).mask(node_mask)
-        elif(self.cfg.guidance.loss in ['kl', 'nll']):
-            #convert to log_softmax. Will be normalized later
-            out.X = torch.log_softmax(out.X, dim=-1)
-            out.E = torch.log_softmax(out.E, dim=-1)
-
-            if(train_step or self.cfg.guidance.s <= 1):
-                #s <= 1 means that we either do not want to use guidance at all
-                #OR we want to use the ORIGINAL VQ loss. In either case, there
-                #is no need to calculate the loss with the null token
-
-                #we assume that the model outputs the UNNORMALIZED log probs.
-                #Thus, we normalize them back.
-                out_X = out.X - torch.logsumexp(out.X, dim=-1, keepdim=True)
-                out_E = out.E - torch.logsumexp(out.E, dim=-1, keepdim=True)
-
-                return utils.PlaceHolder(X = out_X, E = out_E, y = out.y).mask(node_mask)
-            else:
-                #first of all, we need to calculate p(x_0|x_t, None) as well:
-                X_null, E_null, y_null = produce_XEy(noisy_data, extra_data, cf_null_token)
-                out_null = self.model(X_null, E_null, y_null, node_mask)
-
-                out_null.X = torch.log_softmax(out_null.X, dim=-1)
-                out_null.E = torch.log_softmax(out_null.E, dim=-1)
-
-                probX0 = out_null.X + self.cfg.guidance.s*(out.X - out_null.X)
-                probX0 = probX0 - torch.logsumexp(probX0, dim=-1, keepdim=True)
-                
-                probE0 = out_null.E + self.cfg.guidance.s*(out.E - out_null.E)
-                probE0 = probE0 - torch.logsumexp(probE0, dim=-1, keepdim=True)
-
-                return utils.PlaceHolder(X = probX0, E = probE0, y = out.y).mask(node_mask)
         else:
             raise NotImplementedError("ERROR: unimplemented loss")
 
