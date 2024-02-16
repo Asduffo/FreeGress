@@ -103,7 +103,7 @@ def main(cfg: DictConfig):
     assert dataset_config.name in ["qm9", "zinc250k"], "Only QM9/ZINC dataset is supported for now"
 
     if dataset_config["name"] == 'qm9':
-        datamodule = qm9_dataset.QM9DataModule(cfg, regressor=True)
+        datamodule = qm9_dataset.QM9DataModule(cfg)
         dataset_infos = qm9_dataset.QM9infos(datamodule=datamodule, cfg=cfg)
         datamodule.prepare_data()
         train_smiles = qm9_dataset.get_train_smiles(cfg, datamodule.train_dataloader(), dataset_infos)

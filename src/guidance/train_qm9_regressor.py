@@ -50,7 +50,7 @@ def main(cfg: DictConfig):
     assert cfg.model.type == 'discrete'
 
     if dataset_config["name"] == 'qm9':
-        datamodule = qm9_dataset.QM9DataModule(cfg, regressor=True)
+        datamodule = qm9_dataset.QM9DataModule(cfg)
         dataset_infos = qm9_dataset.QM9infos(datamodule=datamodule, cfg=cfg)
         datamodule.prepare_data()
         train_smiles = None
