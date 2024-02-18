@@ -632,21 +632,35 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         outputs = None
         binary_outputs = None
 
+        log_dict = {}
+
+        i = 0
         for tgt in ['mu', 'homo', 'penalizedlogp', 'qed', 'mw', 'sas', 'logp']:
             if tgt in valid_properties:
                 num_valid_molecules = max(num_valid_molecules, len(numerical_results_dict[tgt]))
 
-                curr_numerical = torch.FloatTensor(numerical_results_dict[tgt])
-                curr_binary    = torch.FloatTensor(binary_results_dict[tgt])
+                curr_numerical = torch.FloatTensor(numerical_results_dict[tgt]).unsqueeze(1)
+                curr_binary    = torch.FloatTensor(binary_results_dict[tgt]).unsqueeze(1)
 
                 if(outputs == None):
-                    outputs        = curr_numerical.unsqueeze(1)
-                    binary_outputs = curr_binary.unsqueeze(1)
+                    outputs        = curr_numerical
+                    binary_outputs = curr_binary
                 else:
-                    print("outputs", outputs)
-                    print("binary_outputs", binary_outputs)
-                    outputs        = torch.hstack((outputs, curr_numerical.unsqueeze(1)))
-                    binary_outputs = torch.hstack((binary_outputs, curr_binary.unsqueeze(1)))
+                    print(tgt, " outputs", outputs)
+                    #print("binary_outputs", binary_outputs)
+                    outputs        = torch.hstack((outputs, curr_numerical))
+                    binary_outputs = torch.hstack((binary_outputs, curr_binary))
+
+                if(len(valid_properties) > 1):
+                    curr_tgt_key = "val_epoch/" + tgt + "_mae"
+                    curr_tgt_vec = input_properties[..., i].repeat(curr_numerical.size(0), 1).cpu()
+                    print(tgt, " tgt vec: ", curr_tgt_vec)
+
+                    curr_tgt_mae = MeanAbsoluteError()(curr_numerical, curr_tgt_vec)
+
+                    log_dict.update({curr_tgt_key: curr_tgt_mae})
+                
+                i = i + 1
         
         print("Number of valid samples", num_valid_molecules)
         self.num_valid_molecules += num_valid_molecules
@@ -669,22 +683,24 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             n_unique_smiles_percentage = 0
         print("percentage of unique_samples: ", n_unique_smiles_percentage)
         
-        print("binary_outputs =", binary_outputs)
+        #print("binary_outputs =", binary_outputs)
         print("target_tensor  =", target_tensor)
 
         print('Conditional generation metric:')
         print(f'Epoch {self.current_epoch}: MAE: {mae}')
         print(f'Epoch {self.current_epoch}: success rate: {accuracy}')
 
-        wandb.log({"val_epoch/conditional generation mae": mae,
-                   'Valid molecules'                     : num_valid_molecules,
-                   'Valid molecules splitted'            : split_molecules,
-                   "val_epoch/n_unique_smiles"           : n_unique_smiles,
-                   "val_epoch/n_unique_smiles_percentage": n_unique_smiles_percentage,
-                   })
+        log_dict.update({"val_epoch/conditional generation mae": mae,
+                        'Valid molecules'                     : num_valid_molecules,
+                        'Valid molecules splitted'            : split_molecules,
+                        "val_epoch/n_unique_smiles"           : n_unique_smiles,
+                        "val_epoch/n_unique_smiles_percentage": n_unique_smiles_percentage,
+                        })
 
         if(self.cfg.guidance.experiment_type == 'accuracy'):
-            wandb.log({"val_epoch/accuracy": accuracy})
+            log_dict.update({"val_epoch/accuracy": accuracy})
+
+        wandb.log(log_dict)
 
         return mae
 
