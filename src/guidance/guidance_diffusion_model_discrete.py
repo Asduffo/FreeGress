@@ -43,10 +43,10 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
         super().__init__()
 
         # add for test
-        if load_model:
-            OmegaConf.set_struct(cfg, True)
-            with open_dict(cfg):
-                cfg.guidance = {'use_guidance': True, 'lambda_guidance': 0.5}
+        #if load_model:
+        #    OmegaConf.set_struct(cfg, True)
+        #    with open_dict(cfg):
+        #        cfg.guidance = {'use_guidance': True, 'lambda_guidance': 0.5}
 
         input_dims = dataset_infos.input_dims
         output_dims = dataset_infos.output_dims

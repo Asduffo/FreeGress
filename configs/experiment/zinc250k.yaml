@@ -4,7 +4,6 @@ general:
     gpus : 1
     wandb: 'online'
     remove_h: True
-    target: 'logp'                    # 'mu', 'homo', 'both', 'no-target'
     sample_every_val: 9999
     samples_to_generate: 10
     samples_to_save: 10
@@ -31,5 +30,4 @@ guidance:
                       'mw'   : [150, 99999]} 
     guidance_target: 'logp'
     build_with_partial_charges: "new_method"
-    guidance_properties_list: ['logp']
     include_split: True

@@ -269,7 +269,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         
         #loads self.node_model (only the first time because of the check self.node_model == None)
         if(self.node_model == None and self.cfg.guidance.node_model_path != None):
-            input_size = len(self.cfg.guidance_target)
+            input_size = len(self.cfg.guidance.guidance_target)
 
             node_model_kwargs  = {'cfg': self.cfg, 'dataset_infos': self.dataset_info, 'input_size': input_size}
             self.node_model = QM9NodeModel.load_from_checkpoint(self.cfg.guidance.node_model_path, **node_model_kwargs)

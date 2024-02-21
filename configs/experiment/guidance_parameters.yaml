@@ -4,7 +4,6 @@ general:
     gpus : 1
     wandb: 'online'
     remove_h: True
-    target: 'both'                    # 'mu', 'homo', 'both', 'no-target'
 train:
     n_epochs: 1200
     batch_size: 512

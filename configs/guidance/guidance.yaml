@@ -22,7 +22,6 @@ node_inference_method: "sample" #sample or argmax
 build_with_partial_charges: True
 experiment_type: 'new_method'
 
-guidance_properties_list: ['logp', 'qed']
 test_thresholds: {'mu'   : [-99999,  99999], 
                   'homo' : [-99999,  99999],
          'penalizedlogp' : [  -2.5,     -2],  #[5, 5.5]
