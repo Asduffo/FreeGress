@@ -13,6 +13,7 @@ from src.diffusion import diffusion_utils
 from metrics.train_metrics import TrainLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from src import utils
+from src.timeout_exception import TimeoutException, time_limit
 
 ####################################################à
 #extra imports
@@ -273,6 +274,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
             node_model_kwargs  = {'cfg': self.cfg, 'dataset_infos': self.dataset_info, 'input_size': input_size}
             self.node_model = QM9NodeModel.load_from_checkpoint(self.cfg.guidance.node_model_path, **node_model_kwargs)
+            self.node_model.to(self.cfg.general.gpus[0])
             self.node_model.cfg.general.gpus = self.cfg.general.gpus
 
         num_nodes = None
@@ -526,7 +528,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 print('Psi4 calculation starts!!!')
                 #energy, wave_function = psi4.optimize(level, molecule=molecule, return_wfn=True)
                 try:
-                    energy, wave_function = psi4.energy(level, molecule=molecule, return_wfn=True)
+                    with time_limit(3600):
+                        energy, wave_function = psi4.energy(level, molecule=molecule, return_wfn=True)
                 except:
                     print("Psi4 did not converge")
                     continue

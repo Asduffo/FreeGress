@@ -36,6 +36,7 @@ from src.metrics.sascorer import calculateScore
 from src.utils import graph2mol, clean_mol
 
 from src.datasets import qm9_dataset, zinc250k_dataset
+from src.timeout_exception import TimeoutException, time_limit
 
 class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
@@ -500,7 +501,8 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
                 print('Psi4 calculation starts!!!')
                 #energy, wave_function = psi4.optimize(level, molecule=molecule, return_wfn=True)
                 try:
-                    energy, wave_function = psi4.energy(level, molecule=molecule, return_wfn=True)
+                    with time_limit(3600):
+                        energy, wave_function = psi4.energy(level, molecule=molecule, return_wfn=True)
                 except:
                     print("Psi4 did not converge")
                     continue
