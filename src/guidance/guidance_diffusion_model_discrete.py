@@ -38,6 +38,9 @@ from src.utils import graph2mol, clean_mol
 from src.datasets import qm9_dataset, zinc250k_dataset
 from src.timeout_exception import TimeoutException, time_limit
 
+from torch.distributions import Categorical
+from src.guidance.node_model import QM9NodeModel
+
 class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
                  domain_features, guidance_model=None, load_model=False):
@@ -127,6 +130,9 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
         self.num_valid_molecules = 0
         self.num_total = 0
 
+        #wish I had a more elegant way to do this
+        self.node_model = None
+
         self.guidance_model = guidance_model
 
         #stores the generated smiles on the test step
@@ -143,13 +149,38 @@ class DiscreteDenoisingDiffusionUnconditional(pl.LightningModule):
         # Extract properties
         target_properties = data.guidance.clone()
 
+        #loads self.node_model (only the first time because of the check self.node_model == None)
+        if(self.node_model == None and self.cfg.guidance.node_model_path != None):
+            input_size = len(self.cfg.guidance.guidance_target)
+
+            node_model_kwargs  = {'cfg': self.cfg, 'dataset_infos': self.dataset_info, 'input_size': input_size}
+            self.node_model = QM9NodeModel.load_from_checkpoint(self.cfg.guidance.node_model_path, **node_model_kwargs)
+            self.node_model.to(self.cfg.general.gpus[0])
+            self.node_model.cfg.general.gpus = self.cfg.general.gpus
+
+        num_nodes = None
+        if(self.node_model != None):
+            input_guidance = data.guidance.repeat(10, 1).to(data.guidance.device)
+            num_nodes = torch.nn.functional.softmax(self.node_model.forward_data(input_guidance), dim=-1)
+            #print("raw num_nodes", num_nodes)
+            print("num nodes shape:", num_nodes.size())
+            
+            if(self.cfg.guidance.node_inference_method == "sample"):
+                #this takes num_nodes, and FOR EACH ROW INDEPENDENTLY samples one integer
+                #from the distribution represented by that row
+                num_nodes = torch.tensor([Categorical(num_nodes[i, ...]).sample().item() 
+                                          for i in range(num_nodes.shape[0])]).to(data.guidance.device)
+            else:
+                num_nodes = torch.argmax(num_nodes, dim = -1).to(data.guidance.device)
+            print("num_nodes", num_nodes)
+
         data.y = torch.zeros(data.y.shape[0], 0).type_as(data.y)
         print("TARGET PROPERTIES", target_properties)
 
         start = time.time()
 
         ident = 0
-        samples = self.sample_batch(batch_id=ident, batch_size=10, num_nodes=None,
+        samples = self.sample_batch(batch_id=ident, batch_size=10, num_nodes=num_nodes,
                                     save_final=10,
                                     keep_chain=1,
                                     number_chain_steps=self.number_chain_steps,

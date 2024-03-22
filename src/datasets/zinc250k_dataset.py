@@ -378,7 +378,7 @@ class ZINC250Kinfos(AbstractDatasetInfos):
         self.max_weight = 3000
 
         #TODO: maybe the last 2 are wrong (since they are 'N+' and 'O-' )
-        self.valencies = [4, 3, 2, 1, 3, 1, 1, 1, 3, 2, 4, 1]
+        self.valencies = [4, 3, 2, 1, 3, 1, 1, 1, 3, 2, 2, 3]
 
         self.atom_weights = {1: 12, 2: 14, 3: 16, 4: 19, 5: 10.81, 6: 79.9,
                              7: 35.45, 8: 126.9, 9: 30.97, 10: 30.07, 11: 14, 12: 16}

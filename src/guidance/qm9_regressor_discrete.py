@@ -107,10 +107,12 @@ class Qm9RegressorDiscrete(pl.LightningModule):
         self.test_loss = MeanAbsoluteError()
         self.best_val_mae = 1e8
 
-        self.val_loss_each = [MeanAbsoluteError().to(torch.device(self.args.general.gpus[0] if torch.cuda.is_available() else 'cpu')) for i
+        self.metrics_device = torch.device(self.args.general.gpus[0] if torch.cuda.is_available() else 'cpu')
+        self.val_loss_each = [MeanAbsoluteError().to(self.metrics_device) for i
                               in range(len(self.args.guidance.guidance_target))]
-        self.test_loss_each = [MeanAbsoluteError().to(torch.device(self.args.general.gpus[0] if torch.cuda.is_available() else 'cpu')) for
-                               i in range(len(self.args.guidance.guidance_target))]
+        self.test_loss_each = [MeanAbsoluteError().to(self.metrics_device) for i
+                               in range(len(self.args.guidance.guidance_target))]
+        
         self.target_dict = {0: "mu", 1: "homo"}
 
     def training_step(self, data, i):
@@ -143,7 +145,7 @@ class Qm9RegressorDiscrete(pl.LightningModule):
 
     def on_fit_start(self) -> None:
         self.train_iterations = len(self.trainer.datamodule.train_dataloader())
-        print("Size of the input features", self.Xdim, self.Edim, self.ydim)
+        self.print("Size of the input features", self.Xdim, self.Edim, self.ydim)
 
     def on_train_epoch_start(self) -> None:
         self.start_epoch_time = time.time()
@@ -154,7 +156,7 @@ class Qm9RegressorDiscrete(pl.LightningModule):
         train_mse = self.train_loss.compute()
 
         to_log = {"train_epoch/mse": train_mse}
-        print(f"Epoch {self.current_epoch}: train_mse: {train_mse :.3f} -- {time.time() - self.start_epoch_time:.1f}s ")
+        self.print(f"Epoch {self.current_epoch}: train_mse: {train_mse :.3f} -- {time.time() - self.start_epoch_time:.1f}s ")
 
         wandb.log(to_log)
         self.train_loss.reset()
@@ -180,22 +182,28 @@ class Qm9RegressorDiscrete(pl.LightningModule):
     def on_validation_epoch_end(self) -> None:
         val_mae = self.val_loss.compute()
         to_log = {"val/epoch_mae": val_mae}
-        print(f"Epoch {self.current_epoch}: val_mae: {val_mae :.3f}")
+        self.print(f"Epoch {self.current_epoch}: val_mae: {val_mae :.3f}")
         wandb.log(to_log)
-        self.log('val/epoch_mae', val_mae, on_epoch=True, on_step=False)
+        self.log('val/epoch_mae', val_mae, on_epoch=True, on_step=False, sync_dist=True)
 
         if val_mae < self.best_val_mae:
             self.best_val_mae = val_mae
-        print('Val loss: %.4f \t Best val loss:  %.4f\n' % (val_mae, self.best_val_mae))
+        self.print('Val loss: %.4f \t Best val loss:  %.4f\n' % (val_mae, self.best_val_mae))
 
+        """
         if len(self.args.guidance.guidance_target) > 1: #guidance_target = 'both' in the old codebase
-            print('Val loss each target:')
+            self.print('Val loss each target:')
             for i in range(len(self.args.guidance.guidance_target)): #range(2) in the old codebase
+                self.print("computing mae number ", i)
                 mae_each = self.val_loss_each[i].compute()
-                print(f"Target {self.args.guidance.guidance_target[i]}: val_mae: {mae_each :.3f}")
-                to_log_each = {f"val_epoch/{self.args.guidance.guidance_target[i]}_mae": mae_each}
-                wandb.log(to_log_each)
 
+                self.print(f"Target {self.args.guidance.guidance_target[i]}: val_mae: {mae_each :.3f}")
+                to_log_each = {f"val_epoch/{self.args.guidance.guidance_target[i]}_mae": mae_each}
+
+                self.print("logging")
+                wandb.log(to_log_each)
+        """
+        
         self.val_loss.reset()
         reset_metrics(self.val_loss_each)
 
@@ -250,8 +258,11 @@ class Qm9RegressorDiscrete(pl.LightningModule):
            Output: nll (size 1)
         """
 
+        """
         for i in range(pred.y.shape[1]):
-            mae_each = self.val_loss_each[i](pred.y[:, i], target[:, i])
+            mae_each = self.val_loss_each[i](pred.y[:, i].to(self.metrics_device), 
+                                             target[:, i].to(self.metrics_device))
+        """
 
         mae = self.val_loss(pred.y, target)
         return mae

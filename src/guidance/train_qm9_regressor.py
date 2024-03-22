@@ -127,7 +127,7 @@ def main(cfg: DictConfig):
     trainer = Trainer(gradient_clip_val=cfg.train.clip_grad,
                       accelerator='gpu' if use_gpu else 'cpu',
                       devices=cfg.general.gpus if use_gpu else None,
-                      
+                      strategy="ddp_find_unused_parameters_true",
                       limit_train_batches=20 if name == 'test' else None,
                       limit_val_batches=20 if name == 'test' else None,
                       limit_test_batches=20 if name == 'test' else None,
