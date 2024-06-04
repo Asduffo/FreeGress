@@ -59,29 +59,29 @@ For a generic training on the QM9 dataset, using p_uncond=0.1, HOMO as the targe
 
 ```python3 main.py +experiment=guidance_parameters.yaml general.name='homo_cf_p01_noextra' guidance.guidance_target=["homo"] model.extra_features=null guidance.n_test_molecules_to_sample=4 guidance.n_samples_per_test_molecule=5 train.ckpt_every_n_train_steps=25 general.check_val_every_n_epochs=25 general.gpus=[0] guidance.p_uncond=0.1 train.num_interops_workers=1 general.sample_every_val=9999 general.log_every_steps=191;```
 
-the general idea is as follows:
+The general idea is the following:
  - ```general.name``` is the name of the model
  - ```guidance.guidance_target``` should be a list of all the target properties (for instance, if we were to use both homo and mu instead, we would have ```guidance.guidance_target=["mu","homo"]```
- - ```guidance.n_test_molecules_to_sample``` and ```guidance.n_samples_per_test_molecule```: leave them to low values for the time being. They are really used only during a PROPER test
- - ```train.ckpt_every_n_train_steps```: the number of training epochs between the various checkpoints saved. SHOULD BE EQUAL TO general.check_val_every_n_epochs
- - ```general.gpus```: GPU ID. In theory and in theory only, if you were to pass a list of GPU IDs it should be able to train with multi-GPU support, but I have not tested it
- - ```guidance.p_uncond```: the p_uncond hyperparameter
+ - ```guidance.n_test_molecules_to_sample``` and ```guidance.n_samples_per_test_molecule```: leave them to low values for the time being. They are used only during a proper test
+ - ```train.ckpt_every_n_train_steps```: the number of training epochs between the various checkpoints saved. Should be set equal to general.check_val_every_n_epochs
+ - ```general.gpus```: GPU ID. If you want to train using multiple GPUs, pass a list of IDs (es: general.gpus=[0,1])
+ - ```guidance.p_uncond```: the p_uncond hyperparameter (rho in the paper)
  - ```train.num_interops_workers```: leave it to one
  - ```general.sample_every_val```: leave it to 9999
  - ```model.extra_features```: null if you do not want to use the extra features. 'domain_only' to use only molecular features, 'all' to use spectral features as well
- - ```general.log_every_steps```: this is complicated because of wandb works, but it should be equal to the number of batches in the training set (dataset_size / batch_size, to be clear). Don't pay too much attention to it since it is used only for logging anyway.
+ - ```general.log_every_steps```: this parameter is a bit complicated because of how wandb works, but it should be equal to the number of batches in the training set (dataset_size / batch_size, to be clear). Don't pay too much attention to it since it is used only for logging anyway.
 
-Note that the test launched at the end of the training SHOULD NOT be used for any comparative result as the RNG may change the test set every time. It is much easier to just launch the proper test separately. To test a classifier-free model, check the ```/FreeGress/output folder```. Search for the folder named after the date when you trained the model in the format ```yyyy-mm-dd```. Inside of it, there should be a folder named ```<hour>-<general.name>```, where ```<hour>``` is the time when you started to train the model, in the format ```hh-mm-ss```. The checkpoints are stored inside the folder ```checkpoints/<general.name>/```. To launch a model, execute the command
+Note that the tests launched at the end of the training should not be used for any comparative result as some machines may randomly change the RNG during the test phase. It is much easier to just launch the proper test separately. To test a classifier-free model, check the ```/FreeGress/output folder```. Search for the folder named after the date when you trained the model in the format ```yyyy-mm-dd```. Inside of it, there should be a folder named ```<hour>-<general.name>```, where ```<hour>``` is the time when you started to train the model, in the format ```hh-mm-ss```. The checkpoints are stored inside the folder ```checkpoints/<general.name>/```. To launch a model, execute the command
 
 ```python3 main.py +experiment=guidance_parameters.yaml general.name='homo_cf_p01_noextra_s5' guidance.guidance_target='homo' model.extra_features=null guidance.n_test_molecules_to_sample=100 guidance.n_samples_per_test_molecule=10 train.batch_size=1 general.gpus=[0] train.num_interops_workers=1 general.sample_every_val=9999 general.log_every_steps=191 guidance.guidance_target=["homo"] guidance.s=5 general.test_only="FULL CHECKPOINT PATH"```
 
  -```guidance.s``` is the s hyperparameter
 
-Classifier-based models are slightly different. The unconditional part is trained with something on the line of
+Classifier-based models are slightly different. The unconditional part is trained using something on the line of
 
 ```python3 train_unconditional.py +experiment=guidance_parameters.yaml general.name="cb_qm9" general.gpus=[0] general.log_every_steps=191 model.extra_features=null guidance.guidance_target=NONE  guidance.guidance_medium="NONE"```
 
- - The combination of guidance.guidance_medium="NONE" and guidance.guidance_target=NONE basically says that there is no guidance vector
+ - The combination of guidance.guidance_medium="NONE" and guidance.guidance_target=NONE says that there is no guidance vector
 
 To train the regressor, use something on the line of 
 
@@ -90,7 +90,7 @@ To train the regressor, use something on the line of
  - ```train.n_epochs=1000``` may be reduced. From my personal experience with zinc, it tends to overfit after 100-200 epochs anyway
  - I suggest keeping ```train.ckpt_every_n_train_steps``` and ```general.check_val_every_n_epochs``` relatively low since the validation accuracy tends to swing around easily.
 
-To test a classifier-based model, the command is the same as above (just with guidance.guidance_medium="NONE").
+To test a classifier-based model, the command is the same as above (just with guidance.guidance_medium="NONE", which tells the model to don't attach the guidance vector at the end of the inputs).
 ```python3 guidance/main_guidance.py +experiment=guidance_parameters.yaml general.wandb="online" general.name="cb_qm9_homo_test_100 guidance.guidance_target=["homo"] model.extra_features=null  +general.test_samples_to_generate=100 +general.test_only="PATH TO UNCONDITIONAL CHECKPOINT" general.gpus=[0] guidance.guidance_medium="NONE" train.batch_size=1 +general.trained_regressor_path="PATH TO REGRESSOR" +guidance.lambda_guidance=100;```
 
  - ```guidance.lambda_guidance``` is the \lambda hyperparameter
