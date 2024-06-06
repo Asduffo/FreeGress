@@ -1,5 +1,10 @@
 # Classifier-free graph diffusion for molecular property targeting
 
+The code is based on DiGress' excellent code, which can be found at 
+https://github.com/cvignac/DiGress
+
+We suggest you regularly check the repository for updates.
+
 ## Environment installation
 This code was tested with PyTorch 2.0.1, cuda 11.8 and torch_geometrics 2.3.1
 
